@@ -6,6 +6,8 @@
 //   0x002000 + 0x80*ctx   enable bitmap per context
 //   0x200000 + 0x1000*ctx threshold (off 0), claim/complete (off 4)
 
+use machina_hw_core::irq::IrqLine;
+
 const PRIORITY_BASE: u64 = 0x00_0000;
 const PENDING_BASE: u64 = 0x00_1000;
 const ENABLE_BASE: u64 = 0x00_2000;
@@ -21,11 +23,16 @@ pub struct Plic {
     enable: Vec<Vec<u32>>,
     threshold: Vec<u32>,
     claim: Vec<u32>,
+    context_outputs: Vec<Option<IrqLine>>,
 }
 
 impl Plic {
     pub fn new(num_sources: u32, num_contexts: u32) -> Self {
         let words = num_sources.div_ceil(32) as usize;
+        let mut outputs = Vec::with_capacity(num_contexts as usize);
+        for _ in 0..num_contexts {
+            outputs.push(None);
+        }
         Self {
             num_sources,
             num_contexts,
@@ -34,6 +41,53 @@ impl Plic {
             enable: vec![vec![0u32; words]; num_contexts as usize],
             threshold: vec![0u32; num_contexts as usize],
             claim: vec![0u32; num_contexts as usize],
+            context_outputs: outputs,
+        }
+    }
+
+    /// Connect an output IRQ line for `ctx`.
+    pub fn connect_context_output(
+        &mut self,
+        ctx: u32,
+        irq: IrqLine,
+    ) {
+        if (ctx as usize) < self.context_outputs.len() {
+            self.context_outputs[ctx as usize] = Some(irq);
+        }
+    }
+
+    /// Set or clear a source interrupt and re-evaluate
+    /// outputs.
+    pub fn set_irq(&mut self, source: u32, level: bool) {
+        self.set_pending(source, level);
+        self.update_outputs();
+    }
+
+    /// Re-evaluate all context outputs based on current
+    /// pending, enable, priority, and threshold state.
+    pub fn update_outputs(&self) {
+        for ctx in 0..self.num_contexts as usize {
+            let thresh = self.threshold[ctx];
+            let mut active = false;
+
+            for irq in 1..self.num_sources {
+                let word = (irq / 32) as usize;
+                let bit = 1u32 << (irq % 32);
+                let pending = self.pending[word] & bit != 0;
+                let enabled =
+                    self.enable[ctx][word] & bit != 0;
+                let pri = self.priority[irq as usize];
+                if pending && enabled && pri > thresh {
+                    active = true;
+                    break;
+                }
+            }
+
+            if let Some(ref line) =
+                self.context_outputs[ctx]
+            {
+                line.set(active);
+            }
         }
     }
 
@@ -102,11 +156,12 @@ impl Plic {
 
     // ---- MMIO interface ----
 
-    pub fn read(&self, offset: u64, size: u32) -> u64 {
+    pub fn read(&mut self, offset: u64, size: u32) -> u64 {
         let _ = size;
         // Priority registers.
         if offset < PENDING_BASE {
-            let idx = (offset - PRIORITY_BASE) as usize / 4;
+            let idx =
+                (offset - PRIORITY_BASE) as usize / 4;
             if idx < self.priority.len() {
                 return self.priority[idx] as u64;
             }
@@ -114,7 +169,8 @@ impl Plic {
         }
         // Pending bitmap.
         if offset < ENABLE_BASE {
-            let idx = (offset - PENDING_BASE) as usize / 4;
+            let idx =
+                (offset - PENDING_BASE) as usize / 4;
             if idx < self.pending.len() {
                 return self.pending[idx] as u64;
             }
@@ -124,8 +180,10 @@ impl Plic {
         if offset < CONTEXT_BASE {
             let rel = offset - ENABLE_BASE;
             let ctx = (rel / ENABLE_STRIDE) as usize;
-            let word = ((rel % ENABLE_STRIDE) / 4) as usize;
-            if ctx < self.num_contexts as usize && word < self.enable[ctx].len()
+            let word =
+                ((rel % ENABLE_STRIDE) / 4) as usize;
+            if ctx < self.num_contexts as usize
+                && word < self.enable[ctx].len()
             {
                 return self.enable[ctx][word] as u64;
             }
@@ -140,21 +198,37 @@ impl Plic {
         }
         match reg {
             0 => self.threshold[ctx] as u64,
-            4 => self.claim[ctx] as u64,
+            4 => {
+                // Perform claim: find highest-priority
+                // pending+enabled source, clear pending,
+                // update outputs.
+                let irq = self
+                    .claim_irq(ctx as u32)
+                    .unwrap_or(0);
+                self.update_outputs();
+                irq as u64
+            }
             _ => 0,
         }
     }
 
-    pub fn write(&mut self, offset: u64, size: u32, val: u64) {
+    pub fn write(
+        &mut self,
+        offset: u64,
+        size: u32,
+        val: u64,
+    ) {
         let _ = size;
         let v = val as u32;
 
         // Priority registers.
         if offset < PENDING_BASE {
-            let idx = (offset - PRIORITY_BASE) as usize / 4;
+            let idx =
+                (offset - PRIORITY_BASE) as usize / 4;
             if idx < self.priority.len() {
                 self.priority[idx] = v;
             }
+            self.update_outputs();
             return;
         }
         // Pending bitmap is read-only from software.
@@ -165,11 +239,14 @@ impl Plic {
         if offset < CONTEXT_BASE {
             let rel = offset - ENABLE_BASE;
             let ctx = (rel / ENABLE_STRIDE) as usize;
-            let word = ((rel % ENABLE_STRIDE) / 4) as usize;
-            if ctx < self.num_contexts as usize && word < self.enable[ctx].len()
+            let word =
+                ((rel % ENABLE_STRIDE) / 4) as usize;
+            if ctx < self.num_contexts as usize
+                && word < self.enable[ctx].len()
             {
                 self.enable[ctx][word] = v;
             }
+            self.update_outputs();
             return;
         }
         // Threshold / claim-complete per context.
@@ -180,7 +257,10 @@ impl Plic {
             return;
         }
         match reg {
-            0 => self.threshold[ctx] = v,
+            0 => {
+                self.threshold[ctx] = v;
+                self.update_outputs();
+            }
             4 => self.complete_irq(ctx as u32, v),
             _ => {}
         }

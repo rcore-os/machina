@@ -180,7 +180,7 @@ fn test_ref_machine_irq_wiring() {
     // Raise UART IRQ (source 10) → PLIC pending bit 10.
     m.uart_irq().raise();
     {
-        let plic = m.plic().lock().unwrap();
+        let mut plic = m.plic().lock().unwrap();
         // Read pending register: IRQ 10 is in word 0
         // (bits 0-31 cover IRQs 0-31).
         let pending = plic.read(0x1000, 4);
@@ -194,7 +194,7 @@ fn test_ref_machine_irq_wiring() {
     // Lower UART IRQ → pending bit cleared.
     m.uart_irq().lower();
     {
-        let plic = m.plic().lock().unwrap();
+        let mut plic = m.plic().lock().unwrap();
         let pending = plic.read(0x1000, 4);
         assert_eq!(
             pending & (1 << 10),
@@ -263,4 +263,79 @@ fn test_sbi_unsupported_extension() {
     // Completely unknown extension.
     let r = SbiHandler::handle_ecall(0xDEAD, 0, &args);
     assert_eq!(r.error, -2, "unknown ext → not supported");
+}
+
+#[test]
+fn test_uart_tx_through_machine() {
+    let mut m = RefMachine::new();
+    m.init(&default_opts()).expect("init failed");
+
+    // Write 'X' to UART THR via direct lock.
+    // The attached chardev is NullChardev; verify no
+    // panic and THRE stays set.
+    {
+        let mut uart = m.uart().lock().unwrap();
+        uart.write(0, 0x58); // 'X'
+        let lsr = uart.read(5);
+        assert_ne!(
+            lsr & 0x20,
+            0,
+            "THRE should remain set after TX"
+        );
+    }
+}
+
+#[test]
+fn test_uart_rx_irq_to_plic() {
+    let mut m = RefMachine::new();
+    m.init(&default_opts()).expect("init failed");
+
+    // Enable RX interrupt on UART.
+    {
+        let mut uart = m.uart().lock().unwrap();
+        uart.write(1, 0x01); // IER: enable RX avail
+    }
+
+    // Receive a byte. UART's attached IrqLine should
+    // route to PLIC set_irq(10, true).
+    {
+        let mut uart = m.uart().lock().unwrap();
+        uart.receive(0x42);
+        assert!(
+            uart.irq_pending(),
+            "UART IRQ should be pending"
+        );
+    }
+
+    // Verify PLIC has pending bit 10 set.
+    {
+        let mut plic = m.plic().lock().unwrap();
+        let pending = plic.read(0x1000, 4);
+        assert_ne!(
+            pending & (1 << 10),
+            0,
+            "PLIC should have UART IRQ 10 pending"
+        );
+    }
+
+    // Read RBR to clear the IRQ.
+    {
+        let mut uart = m.uart().lock().unwrap();
+        let _ = uart.read(0);
+        assert!(
+            !uart.irq_pending(),
+            "UART IRQ should be cleared after read"
+        );
+    }
+
+    // PLIC pending bit should now be clear.
+    {
+        let mut plic = m.plic().lock().unwrap();
+        let pending = plic.read(0x1000, 4);
+        assert_eq!(
+            pending & (1 << 10),
+            0,
+            "PLIC UART IRQ 10 should be cleared"
+        );
+    }
 }

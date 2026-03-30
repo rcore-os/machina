@@ -1,4 +1,34 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use machina_hw_core::irq::{IrqLine, IrqSink};
 use machina_hw_intc::plic::Plic;
+
+struct TestIrqSink {
+    levels: Vec<AtomicBool>,
+}
+
+impl TestIrqSink {
+    fn new(n: usize) -> Self {
+        let mut v = Vec::with_capacity(n);
+        for _ in 0..n {
+            v.push(AtomicBool::new(false));
+        }
+        Self { levels: v }
+    }
+
+    fn level(&self, irq: u32) -> bool {
+        self.levels[irq as usize].load(Ordering::Relaxed)
+    }
+}
+
+impl IrqSink for TestIrqSink {
+    fn set_irq(&self, irq: u32, level: bool) {
+        if let Some(f) = self.levels.get(irq as usize) {
+            f.store(level, Ordering::Relaxed);
+        }
+    }
+}
 
 #[test]
 fn test_plic_set_priority() {
@@ -79,4 +109,75 @@ fn test_plic_no_pending() {
 
     // Nothing pending.
     assert_eq!(plic.claim_irq(0), None);
+}
+
+#[test]
+fn test_plic_set_irq_propagates() {
+    let mut plic = Plic::new(64, 2);
+
+    // Connect output for context 0.
+    let sink = Arc::new(TestIrqSink::new(16));
+    let out_irq = 11u32; // MEI
+    let line = IrqLine::new(
+        Arc::clone(&sink) as Arc<dyn IrqSink>,
+        out_irq,
+    );
+    plic.connect_context_output(0, line);
+
+    // Set priority[1] = 1, enable IRQ 1 for ctx 0.
+    plic.write(0x04, 4, 1);
+    plic.write(0x2000, 4, 0x02);
+
+    // No interrupt yet.
+    assert!(
+        !sink.level(out_irq),
+        "output should be low before set_irq"
+    );
+
+    // Assert source 1.
+    plic.set_irq(1, true);
+    assert!(
+        sink.level(out_irq),
+        "output should go high after set_irq"
+    );
+
+    // Deassert source 1.
+    plic.set_irq(1, false);
+    assert!(
+        !sink.level(out_irq),
+        "output should go low after clearing IRQ"
+    );
+}
+
+#[test]
+fn test_plic_claim_on_read() {
+    let mut plic = Plic::new(64, 1);
+
+    // priority[1] = 1, enable IRQ 1 for ctx 0.
+    plic.write(0x04, 4, 1);
+    plic.write(0x2000, 4, 0x02);
+    plic.set_pending(1, true);
+
+    // MMIO read at claim offset (0x200004) should
+    // perform the claim and return IRQ 1.
+    let claimed = plic.read(0x200004, 4);
+    assert_eq!(
+        claimed, 1,
+        "MMIO claim read should return IRQ 1"
+    );
+
+    // Pending bit should now be cleared.
+    let pending = plic.read(0x1000, 4);
+    assert_eq!(
+        pending & (1 << 1),
+        0,
+        "pending bit should be cleared after claim"
+    );
+
+    // Second claim read should return 0 (nothing pending).
+    let claimed2 = plic.read(0x200004, 4);
+    assert_eq!(
+        claimed2, 0,
+        "second claim should return 0"
+    );
 }

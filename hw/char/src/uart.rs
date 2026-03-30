@@ -12,6 +12,9 @@
 
 use std::collections::VecDeque;
 
+use machina_hw_core::chardev::Chardev;
+use machina_hw_core::irq::IrqLine;
+
 // IER bits
 const IER_RX_AVAIL: u8 = 1 << 0;
 
@@ -45,6 +48,8 @@ pub struct Uart16550 {
     dlm: u8,
     rx_fifo: VecDeque<u8>,
     irq_pending: bool,
+    irq_line: Option<IrqLine>,
+    chardev: Option<Box<dyn Chardev + Send>>,
 }
 
 impl Uart16550 {
@@ -64,7 +69,22 @@ impl Uart16550 {
             dlm: 0,
             rx_fifo: VecDeque::with_capacity(FIFO_SIZE),
             irq_pending: false,
+            irq_line: None,
+            chardev: None,
         }
+    }
+
+    /// Connect an IRQ output line.
+    pub fn attach_irq(&mut self, irq: IrqLine) {
+        self.irq_line = Some(irq);
+    }
+
+    /// Attach a character device backend.
+    pub fn attach_chardev(
+        &mut self,
+        backend: Box<dyn Chardev + Send>,
+    ) {
+        self.chardev = Some(backend);
     }
 
     /// Push a byte into the receive FIFO.
@@ -84,14 +104,22 @@ impl Uart16550 {
         let mut iir = IIR_NONE;
 
         // RX data available has higher priority.
-        if (self.ier & IER_RX_AVAIL) != 0 && (self.lsr & LSR_DR) != 0 {
+        if (self.ier & IER_RX_AVAIL) != 0
+            && (self.lsr & LSR_DR) != 0
+        {
             iir = IIR_RX_AVAIL;
-        } else if (self.ier & 0x02) != 0 && (self.lsr & LSR_THRE) != 0 {
+        } else if (self.ier & 0x02) != 0
+            && (self.lsr & LSR_THRE) != 0
+        {
             iir = IIR_THR_EMPTY;
         }
 
         self.iir = iir;
         self.irq_pending = iir != IIR_NONE;
+
+        if let Some(ref line) = self.irq_line {
+            line.set(self.irq_pending);
+        }
     }
 
     pub fn read(&mut self, offset: u64) -> u8 {
@@ -170,6 +198,10 @@ impl Uart16550 {
 
     fn write_thr(&mut self, val: u8) {
         self.thr = val;
+        // Forward to chardev backend if attached.
+        if let Some(ref mut c) = self.chardev {
+            c.write(val);
+        }
         // In emulation the byte is "transmitted"
         // instantly, so THRE stays set.
         self.lsr |= LSR_THRE | LSR_TEMT;

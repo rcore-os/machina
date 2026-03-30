@@ -237,11 +237,10 @@ impl Decode<Context> for RiscvDisasContext {
     // ── Privileged: trap return / system ──────────────────
 
     fn trans_mret(&mut self, ir: &mut Context, _a: &ArgsEmpty) -> bool {
-        // Sync PC, then exit TB with EXCP_MRET so the
-        // execution loop calls cpu.execute_mret().
-        // No chaining: privilege level changes invalidate
-        // the TB target assumptions.
-        let pc = ir.new_const(Type::I64, self.base.pc_next);
+        // Write next-insn PC so exec loop doesn't re-execute
+        // this instruction after mret changes privilege.
+        let next = self.base.pc_next + self.cur_insn_len as u64;
+        let pc = ir.new_const(Type::I64, next);
         ir.gen_mov(Type::I64, self.pc, pc);
         ir.gen_exit_tb(EXCP_MRET);
         self.base.is_jmp = DisasJumpType::NoReturn;
@@ -249,7 +248,8 @@ impl Decode<Context> for RiscvDisasContext {
     }
 
     fn trans_sret(&mut self, ir: &mut Context, _a: &ArgsEmpty) -> bool {
-        let pc = ir.new_const(Type::I64, self.base.pc_next);
+        let next = self.base.pc_next + self.cur_insn_len as u64;
+        let pc = ir.new_const(Type::I64, next);
         ir.gen_mov(Type::I64, self.pc, pc);
         ir.gen_exit_tb(EXCP_SRET);
         self.base.is_jmp = DisasJumpType::NoReturn;
@@ -257,9 +257,10 @@ impl Decode<Context> for RiscvDisasContext {
     }
 
     fn trans_wfi(&mut self, ir: &mut Context, _a: &ArgsEmpty) -> bool {
-        // Halt until interrupt. Sync PC and exit TB so the
-        // execution loop can enter a wait state.
-        let pc = ir.new_const(Type::I64, self.base.pc_next);
+        // Write next-insn PC so resume after WFI starts at
+        // the following instruction.
+        let next = self.base.pc_next + self.cur_insn_len as u64;
+        let pc = ir.new_const(Type::I64, next);
         ir.gen_mov(Type::I64, self.pc, pc);
         ir.gen_exit_tb(EXCP_WFI);
         self.base.is_jmp = DisasJumpType::NoReturn;
@@ -284,7 +285,8 @@ impl Decode<Context> for RiscvDisasContext {
         // exec loop, or (b) introducing a distinct exit code
         // per flush granularity.  Until then the full-flush
         // fallback is architecturally correct.
-        let pc = ir.new_const(Type::I64, self.base.pc_next);
+        let next = self.base.pc_next + self.cur_insn_len as u64;
+        let pc = ir.new_const(Type::I64, next);
         ir.gen_mov(Type::I64, self.pc, pc);
         ir.gen_exit_tb(EXCP_SFENCE_VMA);
         self.base.is_jmp = DisasJumpType::NoReturn;

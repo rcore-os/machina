@@ -684,7 +684,8 @@ fn test_mret_exit() {
     let mut cpu = RiscvCpu::new();
     let exit = run_rv(&mut cpu, mret());
     assert_eq!(exit, EXCP_MRET as usize);
-    assert_eq!(cpu.pc, 0);
+    // PC points past the mret instruction (next-insn PC).
+    assert_eq!(cpu.pc, 4);
 }
 
 #[test]
@@ -692,7 +693,7 @@ fn test_sret_exit() {
     let mut cpu = RiscvCpu::new();
     let exit = run_rv(&mut cpu, sret());
     assert_eq!(exit, EXCP_SRET as usize);
-    assert_eq!(cpu.pc, 0);
+    assert_eq!(cpu.pc, 4);
 }
 
 #[test]
@@ -700,7 +701,7 @@ fn test_wfi_exit() {
     let mut cpu = RiscvCpu::new();
     let exit = run_rv(&mut cpu, wfi());
     assert_eq!(exit, EXCP_WFI as usize);
-    assert_eq!(cpu.pc, 0);
+    assert_eq!(cpu.pc, 4);
 }
 
 #[test]
@@ -708,7 +709,7 @@ fn test_sfence_vma_exit() {
     let mut cpu = RiscvCpu::new();
     let exit = run_rv(&mut cpu, sfence_vma(0, 0));
     assert_eq!(exit, EXCP_SFENCE_VMA as usize);
-    assert_eq!(cpu.pc, 0);
+    assert_eq!(cpu.pc, 4);
 }
 
 #[test]
@@ -717,7 +718,7 @@ fn test_sfence_vma_with_rs1() {
     cpu.gpr[5] = 0x1000;
     let exit = run_rv(&mut cpu, sfence_vma(5, 0));
     assert_eq!(exit, EXCP_SFENCE_VMA as usize);
-    assert_eq!(cpu.pc, 0);
+    assert_eq!(cpu.pc, 4);
     // GPR unchanged (sfence_vma doesn't modify registers).
     assert_eq!(cpu.gpr[5], 0x1000);
 }

@@ -2,7 +2,7 @@
 
 mod multi_vcpu;
 
-use machina_accel::exec::exec_loop::{cpu_exec_loop, ExitReason};
+use machina_accel::exec::exec_loop::{cpu_exec_loop_env, ExitReason};
 use machina_accel::exec::ExecEnv;
 use machina_accel::ir::context::Context;
 use machina_accel::ir::tb::EXCP_EBREAK;
@@ -180,7 +180,7 @@ fn run(insns: &[u32], setup: impl FnOnce(&mut TestCpu)) -> TestCpu {
     let mut t = TestCpu::new(insns);
     setup(&mut t);
     let mut env = ExecEnv::new(X86_64CodeGen::new());
-    let r = unsafe { cpu_exec_loop(&mut env, &mut t) };
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut t) };
     assert_eq!(
         r,
         ExitReason::Ecall { priv_level: 0 },
@@ -196,7 +196,7 @@ fn run_env(
     let mut t = TestCpu::new(insns);
     setup(&mut t);
     let mut env = ExecEnv::new(X86_64CodeGen::new());
-    let r = unsafe { cpu_exec_loop(&mut env, &mut t) };
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut t) };
     assert_eq!(r, ExitReason::Ecall { priv_level: 0 });
     (t, env)
 }
@@ -225,7 +225,7 @@ fn test_exec_loop_cache_hit() {
     let mut t = TestCpu::new(&insns);
     let mut env = ExecEnv::new(X86_64CodeGen::new());
 
-    let r1 = unsafe { cpu_exec_loop(&mut env, &mut t) };
+    let r1 = unsafe { cpu_exec_loop_env(&mut env, &mut t) };
     assert_eq!(r1, ExitReason::Ecall { priv_level: 0 });
     assert_eq!(t.cpu.gpr[1], 5);
     assert_eq!(env.shared.tb_store.len(), 1);
@@ -233,7 +233,7 @@ fn test_exec_loop_cache_hit() {
     // Reset PC and x1, run again — should hit cache
     t.cpu.pc = 0;
     t.cpu.gpr[1] = 0;
-    let r2 = unsafe { cpu_exec_loop(&mut env, &mut t) };
+    let r2 = unsafe { cpu_exec_loop_env(&mut env, &mut t) };
     assert_eq!(r2, ExitReason::Ecall { priv_level: 0 });
     assert_eq!(t.cpu.gpr[1], 5);
     assert_eq!(env.shared.tb_store.len(), 1);
@@ -639,7 +639,7 @@ fn test_ebreak_exit_code() {
     let insns = [addi(1, 0, 77), ebreak()];
     let mut t = TestCpu::new(&insns);
     let mut env = ExecEnv::new(X86_64CodeGen::new());
-    let r = unsafe { cpu_exec_loop(&mut env, &mut t) };
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut t) };
     assert_eq!(r, ExitReason::Exit(EXCP_EBREAK as usize));
     assert_eq!(t.cpu.gpr[1], 77);
 }
@@ -747,7 +747,7 @@ fn test_exec_loop_mret_continues() {
     let insns = [addi(1, 0, 10), mret(), addi(2, 0, 20), ecall()];
     let mut t = TestCpu::new(&insns);
     let mut env = ExecEnv::new(X86_64CodeGen::new());
-    let r = unsafe { cpu_exec_loop(&mut env, &mut t) };
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut t) };
     assert_eq!(
         r,
         ExitReason::Ecall { priv_level: 0 },
@@ -766,7 +766,7 @@ fn test_exec_loop_wfi_halts() {
     let insns = [addi(1, 0, 42), wfi()];
     let mut t = TestCpu::new(&insns);
     let mut env = ExecEnv::new(X86_64CodeGen::new());
-    let r = unsafe { cpu_exec_loop(&mut env, &mut t) };
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut t) };
     assert_eq!(r, ExitReason::Halted);
     assert_eq!(t.cpu.gpr[1], 42);
 }
@@ -782,7 +782,7 @@ fn test_exec_loop_sfence_vma_continues() {
     let insns = [addi(1, 0, 5), sfence_vma(0, 0), addi(2, 0, 99), ecall()];
     let mut t = TestCpu::new(&insns);
     let mut env = ExecEnv::new(X86_64CodeGen::new());
-    let r = unsafe { cpu_exec_loop(&mut env, &mut t) };
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut t) };
     assert_eq!(
         r,
         ExitReason::Ecall { priv_level: 0 },
@@ -799,7 +799,7 @@ fn test_ecall_priv_level_u_mode() {
     let insns = [addi(1, 0, 1), ecall()];
     let mut t = TestCpu::new(&insns);
     let mut env = ExecEnv::new(X86_64CodeGen::new());
-    let r = unsafe { cpu_exec_loop(&mut env, &mut t) };
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut t) };
     assert_eq!(r, ExitReason::Ecall { priv_level: 0 });
 }
 
@@ -840,7 +840,7 @@ fn test_ecall_from_different_privs() {
         priv_level: 0,
     };
     let mut env = ExecEnv::new(X86_64CodeGen::new());
-    let r = unsafe { cpu_exec_loop(&mut env, &mut cpu) };
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
     assert_eq!(r, ExitReason::Ecall { priv_level: 0 });
 
     // S-mode (1)
@@ -848,7 +848,7 @@ fn test_ecall_from_different_privs() {
     cpu.priv_level = 1;
     cpu.inner.cpu.pc = 0;
     let mut env = ExecEnv::new(X86_64CodeGen::new());
-    let r = unsafe { cpu_exec_loop(&mut env, &mut cpu) };
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
     assert_eq!(r, ExitReason::Ecall { priv_level: 1 });
 
     // M-mode (3)
@@ -856,6 +856,6 @@ fn test_ecall_from_different_privs() {
     cpu.priv_level = 3;
     cpu.inner.cpu.pc = 0;
     let mut env = ExecEnv::new(X86_64CodeGen::new());
-    let r = unsafe { cpu_exec_loop(&mut env, &mut cpu) };
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
     assert_eq!(r, ExitReason::Ecall { priv_level: 3 });
 }

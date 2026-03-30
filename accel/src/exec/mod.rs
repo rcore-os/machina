@@ -10,7 +10,7 @@
 pub mod exec_loop;
 pub mod tb_store;
 
-pub use exec_loop::{cpu_exec_loop, ExitReason};
+pub use exec_loop::{cpu_exec_loop_env, ExitReason};
 pub use tb_store::TbStore;
 
 use std::cell::UnsafeCell;
@@ -130,12 +130,12 @@ impl<B: HostCodeGen> SharedState<B> {
 }
 
 /// Per-vCPU state (not shared across threads).
-pub struct PerVcpuState {
+pub struct PerCpuState {
     pub jump_cache: JumpCache,
     pub stats: ExecStats,
 }
 
-impl PerVcpuState {
+impl PerCpuState {
     pub fn new() -> Self {
         Self {
             jump_cache: JumpCache::new(),
@@ -144,7 +144,7 @@ impl PerVcpuState {
     }
 }
 
-impl Default for PerVcpuState {
+impl Default for PerCpuState {
     fn default() -> Self {
         Self::new()
     }
@@ -157,7 +157,7 @@ const MIN_CODE_BUF_REMAINING: usize = 4096;
 /// Convenience wrapper for single-threaded use.
 pub struct ExecEnv<B: HostCodeGen> {
     pub shared: Arc<SharedState<B>>,
-    pub per_vcpu: PerVcpuState,
+    pub per_cpu: PerCpuState,
 }
 
 impl<B: HostCodeGen> ExecEnv<B> {
@@ -181,7 +181,7 @@ impl<B: HostCodeGen> ExecEnv<B> {
 
         Self {
             shared,
-            per_vcpu: PerVcpuState {
+            per_cpu: PerCpuState {
                 jump_cache: JumpCache::new(),
                 stats: ExecStats::default(),
             },

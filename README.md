@@ -18,7 +18,7 @@ A modular RISC-V full-system emulator written in Rust, featuring a JIT dynamic b
                                                                     v
                         +----------------------------------------------+
                         |               Execution Engine               |
-                        |  TB Cache + Multi-vCPU + Chaining + MMIO      |
+                        |  TB Cache + Multi-vCPU + Chaining + MMIO     |
                         +----------------------+-----------------------+
                                                |
                                                v

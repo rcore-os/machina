@@ -80,7 +80,7 @@ Signed-off-by: Chao Liu <chao.liu.zevorn@gmail.com>
                                                                     v
                         +----------------------------------------------+
                         |               Execution Engine               |
-                        |  TB Cache + Multi-vCPU + Chaining + MMIO      |
+                        |  TB Cache + Multi-vCPU + Chaining + MMIO     |
                         +----------------------+-----------------------+
                                                |
                                                v

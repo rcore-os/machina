@@ -18,7 +18,7 @@
                                                                     v
                         +----------------------------------------------+
                         |               Execution Engine               |
-                        |  TB Cache + Multi-vCPU + Chaining + MMIO      |
+                        |  TB Cache + Multi-vCPU + Chaining + MMIO     |
                         +----------------------+-----------------------+
                                                |
                                                v

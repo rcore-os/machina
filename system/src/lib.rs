@@ -101,4 +101,26 @@ mod tests {
         // Waker should unblock any waiting thread.
         assert!(!wk.wait()); // returns false (stopped)
     }
+
+    #[test]
+    fn test_wfi_stop_unblocks_concurrent_wait() {
+        // Verify stop() can unblock a thread that is
+        // already blocked in wait().
+        let wk = Arc::new(WfiWaker::new());
+        let wk2 = wk.clone();
+        let handle = std::thread::spawn(move || {
+            // This will block until stop() is called.
+            wk2.wait()
+        });
+        // Give the thread time to enter wait().
+        std::thread::sleep(
+            std::time::Duration::from_millis(50),
+        );
+        wk.stop();
+        let result = handle.join().unwrap();
+        assert!(
+            !result,
+            "wait() must return false when stopped"
+        );
+    }
 }

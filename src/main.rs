@@ -7,6 +7,7 @@ use std::process;
 use machina_accel::exec::ExecEnv;
 use machina_accel::X86_64CodeGen;
 use machina_core::machine::{Machine, MachineOpts};
+use machina_guest_riscv::riscv::cpu::RiscvCpu;
 use machina_hw_riscv::ref_machine::RefMachine;
 use machina_system::cpus::FullSystemCpu;
 use machina_system::CpuManager;
@@ -168,13 +169,13 @@ fn main() {
     let shared = env.shared.clone();
 
     // Take CPU0 state from machine for execution.
-    // Get shared_mip from machine — same atomic that
-    // device IRQ sinks write to.
+    // Swap with a fresh RiscvCpu to preserve vector size
+    // (device IRQ sinks use SharedMip, not the vector).
     let shared_mip = machine.shared_mip();
     let cpus = machine.cpus_shared();
     let cpu0 = {
         let mut lock = cpus.lock().unwrap();
-        lock.remove(0)
+        std::mem::replace(&mut lock[0], RiscvCpu::new())
     };
 
     let ram_ptr = machine.ram_ptr();

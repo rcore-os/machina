@@ -512,7 +512,6 @@ fn test_mmio_sentinel_forces_slow_path() {
 /// Sv39 write without D bit → TLB miss on write.
 #[test]
 fn test_sv39_write_without_dirty_bit() {
-    use machina_guest_riscv::riscv::exception::Exception;
     let va = 0xC000_0000u64;
     // R|W|X|U|A but NOT D (0b0111_1111 & ~D = 0x7F
     // minus D=0x80 → 0x7F)

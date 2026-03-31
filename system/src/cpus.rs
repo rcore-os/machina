@@ -315,6 +315,14 @@ impl GuestCpu for FullSystemCpu {
             0u32
         };
 
+        // If page B fetch failed, a fault is latched
+        // (mem_fault_cause != 0). Return immediately
+        // to prevent the translator from falling back
+        // to raw pointer fetch_insn32().
+        if self.cpu.mem_fault_cause != 0 {
+            return 0;
+        }
+
         let cfg = RiscvCfg::default();
 
         // The virtual PC of the boundary instruction

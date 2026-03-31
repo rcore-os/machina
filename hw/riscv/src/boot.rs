@@ -84,6 +84,10 @@ enum BiosSource<'a> {
     Embedded,
 }
 
+fn is_elf(data: &[u8]) -> bool {
+    data.len() >= 4 && data[0..4] == [0x7f, b'E', b'L', b'F']
+}
+
 fn resolve_bios(bios_path: &Option<std::path::PathBuf>) -> BiosSource<'_> {
     match bios_path {
         Some(p) => {
@@ -107,13 +111,20 @@ pub fn boot_ref_machine(
     let bios_source = resolve_bios(&machine.bios_path);
     let has_firmware = !matches!(bios_source, BiosSource::None);
 
-    // Load firmware at RAM_BASE.
+    // Load firmware: try ELF first, fall back to raw binary.
+    let mut fw_entry: Option<u64> = None;
     match bios_source {
         BiosSource::File(path) => {
             let data = std::fs::read(path)?;
             let as_ = machine.address_space();
-            loader::load_binary(&data, GPA::new(RAM_BASE), as_)
-                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            if is_elf(&data) {
+                let info = loader::load_elf(&data, as_)
+                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+                fw_entry = Some(info.entry.0);
+            } else {
+                loader::load_binary(&data, GPA::new(RAM_BASE), as_)
+                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            }
         }
         BiosSource::Embedded => {
             if EMBEDDED_FW.is_empty() {
@@ -129,12 +140,19 @@ pub fn boot_ref_machine(
         BiosSource::None => {}
     }
 
-    // Load kernel at RAM_BASE + KERNEL_OFFSET.
+    // Load kernel: try ELF first, fall back to raw binary.
+    let mut kernel_entry: Option<u64> = None;
     if let Some(ref kernel_path) = machine.kernel_path {
         let data = std::fs::read(kernel_path)?;
         let as_ = machine.address_space();
-        loader::load_binary(&data, GPA::new(RAM_BASE + KERNEL_OFFSET), as_)
-            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        if is_elf(&data) {
+            let info = loader::load_elf(&data, as_)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            kernel_entry = Some(info.entry.0);
+        } else {
+            loader::load_binary(&data, GPA::new(RAM_BASE + KERNEL_OFFSET), as_)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        }
     }
 
     // Place FDT at top of RAM, aligned to 8 bytes.
@@ -170,8 +188,12 @@ pub fn boot_ref_machine(
             cpu.gpr[10] = 0; // a0 = hart_id
             cpu.gpr[11] = fdt_addr; // a1 = fdt_addr
             cpu.gpr[12] = dynamic_info_addr; // a2
-            if has_firmware {
+            if let Some(entry) = fw_entry {
+                cpu.pc = entry;
+            } else if has_firmware {
                 cpu.pc = RAM_BASE;
+            } else if let Some(entry) = kernel_entry {
+                cpu.pc = entry;
             } else if machine.kernel_path.is_some() {
                 cpu.pc = RAM_BASE + KERNEL_OFFSET;
             } else {

@@ -232,3 +232,38 @@ fn test_aclint_timer_thread_asserts_mti() {
     std::thread::sleep(std::time::Duration::from_millis(30));
     assert!(sink.level(mti), "MTI should be high after timer deadline");
 }
+
+#[test]
+fn test_aclint_retarget_future_cancels_stale_timer() {
+    let mut aclint = Aclint::new(1);
+    let sink = Arc::new(TestIrqSink::new(16));
+    let mti = 7u32;
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, mti);
+    aclint.connect_mti(0, line);
+
+    let now = aclint.read(0xBFF8, 8);
+
+    // Set mtimecmp to now+20ms, then immediately retarget
+    // to now+1s. The old 20ms timer must be cancelled.
+    aclint.write(0x4000, 8, now + 200_000); // 20ms
+    aclint.write(0x4000, 8, now + 10_000_000); // 1s
+
+    // After 50ms, old timer would have fired but MTI
+    // should still be low because it was cancelled.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert!(
+        !sink.level(mti),
+        "MTI must stay low after retarget cancelled \
+         the old 20ms timer"
+    );
+
+    // Now retarget to near future (10ms from current).
+    let now2 = aclint.read(0xBFF8, 8);
+    aclint.write(0x4000, 8, now2 + 100_000); // 10ms
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    assert!(
+        sink.level(mti),
+        "MTI should be high after retarget to near \
+         future"
+    );
+}

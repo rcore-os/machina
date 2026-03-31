@@ -165,3 +165,69 @@ fn irbackend_multiple_tbs() {
 
     let _ = fs::remove_file(tmp_ir);
 }
+
+fn ensure_machina_built() {
+    let status = Command::new("cargo")
+        .args(["build", "-p", "machina"])
+        .current_dir(project_root())
+        .status()
+        .expect("cargo build machina failed");
+    assert!(status.success(), "cargo build machina failed");
+}
+
+fn sbi_smoke_bin() -> PathBuf {
+    project_root().join("tests/firmware/sbi_smoke.bin")
+}
+
+/// End-to-end boot test: bundled RustSBI Prototyper +
+/// sbi_smoke.bin payload. Asserts RustSBI banner and
+/// MACHINA_SBI_OK marker in combined output.
+#[test]
+fn boot_rustsbi_with_sbi_smoke_payload() {
+    ensure_machina_built();
+
+    let child = Command::new(bin_path("machina"))
+        .args([
+            "-M",
+            "riscv64-ref",
+            "-m",
+            "128",
+            "-kernel",
+            sbi_smoke_bin().to_str().unwrap(),
+            "-nographic",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("machina process failed to start");
+
+    let output = child
+        .wait_with_output()
+        .expect("failed to wait for machina");
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    assert!(
+        combined.contains("RustSBI"),
+        "output must contain RustSBI banner.\n\
+         combined output:\n{}",
+        combined,
+    );
+    assert!(
+        combined.contains("MACHINA_SBI_OK"),
+        "output must contain MACHINA_SBI_OK marker.\n\
+         combined output:\n{}",
+        combined,
+    );
+    assert!(
+        output.status.success(),
+        "machina must exit with code 0.\n\
+         exit status: {:?}\ncombined output:\n{}",
+        output.status,
+        combined,
+    );
+}

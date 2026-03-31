@@ -146,11 +146,17 @@ mod tests {
         use std::time::{Duration, Instant};
         let wk = Arc::new(WfiWaker::new());
         let wk2 = wk.clone();
-        // Set a 20ms deadline.
-        wk.set_deadline(Instant::now() + Duration::from_millis(20));
+        let t0 = Instant::now();
+        wk.set_deadline(t0 + Duration::from_millis(20));
         let handle = std::thread::spawn(move || wk2.wait());
         let result = handle.join().unwrap();
+        let elapsed = t0.elapsed();
         assert!(result, "wait() must return true on timer wakeup");
+        assert!(
+            elapsed < Duration::from_millis(80),
+            "timer wakeup took {:?}, expected < 80ms",
+            elapsed
+        );
     }
 
     #[test]
@@ -158,13 +164,18 @@ mod tests {
         use std::time::{Duration, Instant};
         let wk = Arc::new(WfiWaker::new());
         let wk2 = wk.clone();
-        // Set a long deadline (1 second).
-        wk.set_deadline(Instant::now() + Duration::from_secs(1));
+        let t0 = Instant::now();
+        wk.set_deadline(t0 + Duration::from_secs(1));
         let handle = std::thread::spawn(move || wk2.wait());
-        // IRQ arrives after 20ms — should preempt.
         std::thread::sleep(Duration::from_millis(20));
         wk.wake();
         let result = handle.join().unwrap();
+        let elapsed = t0.elapsed();
         assert!(result, "wait() must return true on IRQ preempt");
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "IRQ preempt took {:?}, expected < 200ms",
+            elapsed
+        );
     }
 }

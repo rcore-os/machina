@@ -207,24 +207,17 @@ fn main() {
     cpu_mgr.add_cpu(fs_cpu);
 
     // Wire SiFive Test to execution control.
+    use machina_hw_riscv::sifive_test::ShutdownReason;
+    let shutdown_reason: Arc<std::sync::Mutex<Option<ShutdownReason>>> =
+        Arc::new(std::sync::Mutex::new(None));
     {
-        use machina_hw_riscv::sifive_test::ShutdownReason;
+        let reason_slot = Arc::clone(&shutdown_reason);
         let flag = Arc::clone(&stop_flag);
         let wk = wfi_waker;
         machine
             .sifive_test()
             .set_shutdown_handler(Box::new(move |reason| {
-                match reason {
-                    ShutdownReason::Pass => {
-                        eprintln!("machina: shutdown (pass)");
-                    }
-                    ShutdownReason::Reset => {
-                        eprintln!("machina: reset requested");
-                    }
-                    ShutdownReason::Fail(code) => {
-                        eprintln!("machina: fail (code {:#x})", code);
-                    }
-                }
+                *reason_slot.lock().unwrap() = Some(reason);
                 flag.store(false, Ordering::SeqCst);
                 wk.stop();
             }));
@@ -232,7 +225,25 @@ fn main() {
 
     eprintln!("machina: entering execution loop");
 
-    let exit = unsafe { cpu_mgr.run(&shared) };
+    let _exit = unsafe { cpu_mgr.run(&shared) };
 
-    eprintln!("machina: execution exited: {:?}", exit);
+    let code = match *shutdown_reason.lock().unwrap() {
+        Some(ShutdownReason::Pass) => {
+            eprintln!("machina: shutdown (pass)");
+            0
+        }
+        Some(ShutdownReason::Reset) => {
+            eprintln!("machina: reset requested");
+            3
+        }
+        Some(ShutdownReason::Fail(c)) => {
+            eprintln!("machina: fail (code {:#x})", c);
+            1
+        }
+        None => {
+            eprintln!("machina: execution exited");
+            0
+        }
+    };
+    process::exit(code);
 }

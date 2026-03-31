@@ -21,7 +21,6 @@ use machina_guest_riscv::{translator_loop, DisasJumpType, TranslatorOps};
 
 const NUM_GPRS: usize = 32;
 pub const RAM_BASE: u64 = 0x8000_0000;
-const PAGE_SIZE_U64: u64 = 4096;
 
 /// Compute the byte offset of the TLB Box pointer from
 /// the start of RiscvCpu (env pointer). Used by the JIT
@@ -208,10 +207,7 @@ impl GuestCpu for FullSystemCpu {
             return 0;
         }
 
-        // Limit TB to not cross physical page boundary.
-        let page_remain = PAGE_SIZE_U64 - (phys_pc & (PAGE_SIZE_U64 - 1));
-        let avail_bytes = page_remain.min(self.ram_size - phys_offset);
-        let avail = avail_bytes / 4;
+        let avail = (self.ram_size - phys_offset) / 4;
         let limit = max_insns.min(avail as u32);
         if limit == 0 {
             return 0;
@@ -588,9 +584,9 @@ unsafe fn read_phys_sized(cpu: *const RiscvCpu, pa: u64, size: u32) -> u64 {
         let ptr = (gb + pa) as *const u8;
         match size {
             1 => *ptr as u64,
-            2 => *(ptr as *const u16) as u64,
-            4 => *(ptr as *const u32) as u64,
-            8 => *(ptr as *const u64),
+            2 => (ptr as *const u16).read_unaligned() as u64,
+            4 => (ptr as *const u32).read_unaligned() as u64,
+            8 => (ptr as *const u64).read_unaligned(),
             _ => 0,
         }
     } else {
@@ -613,9 +609,9 @@ unsafe fn write_phys_sized(cpu: *mut RiscvCpu, pa: u64, val: u64, size: u32) {
         let ptr = (gb + pa) as *mut u8;
         match size {
             1 => *ptr = val as u8,
-            2 => *(ptr as *mut u16) = val as u16,
-            4 => *(ptr as *mut u32) = val as u32,
-            8 => *(ptr as *mut u64) = val,
+            2 => (ptr as *mut u16).write_unaligned(val as u16),
+            4 => (ptr as *mut u32).write_unaligned(val as u32),
+            8 => (ptr as *mut u64).write_unaligned(val),
             _ => {}
         }
     } else {

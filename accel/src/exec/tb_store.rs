@@ -6,7 +6,7 @@ use crate::code_buffer::CodeBuffer;
 use crate::ir::tb::{TranslationBlock, TB_HASH_SIZE};
 use crate::HostCodeGen;
 
-const MAX_TBS: usize = 262144;
+const MAX_TBS: usize = 65536;
 
 /// Thread-safe storage and hash-table lookup for TBs.
 ///

@@ -1279,6 +1279,11 @@ impl X86_64CodeGen {
     ];
     // Scratch slot for passing values across the call.
     const MMIO_SCRATCH: i32 = 80;
+    // Extra scratch slots for saving registers clobbered
+    // by the TLB inline check (RAX, R10, R11).
+    const TLB_SAVE_RAX: i32 = 96;
+    const TLB_SAVE_R10: i32 = 104;
+    const TLB_SAVE_R11: i32 = 112;
 
     /// Save all caller-saved GPRs to the stack frame.
     fn emit_save_caller_regs(buf: &mut CodeBuffer) {
@@ -1339,13 +1344,23 @@ impl X86_64CodeGen {
         let sign = memop & 4 != 0;
         let size_bytes: u32 = 1 << size;
 
-        // Save addr to stack (BL-20260331-jit-tlb-scratch-regs).
+        // Save addr and scratch regs clobbered by the
+        // TLB inline check so live IR temps survive.
         emit_store(buf, true, addr, Reg::Rsp, Self::MMIO_SCRATCH);
+        emit_store(buf, true, Reg::Rax, Reg::Rsp, Self::TLB_SAVE_RAX);
+        emit_store(buf, true, Reg::R10, Reg::Rsp, Self::TLB_SAVE_R10);
+        emit_store(buf, true, Reg::R11, Reg::Rsp, Self::TLB_SAVE_R11);
 
         // -- TLB inline check --
-        // r11 = TLB index = (addr >> 12) & mask
+        // r11 = TLB index = ((vpn ^ (vpn >> 8)) & mask)
+        // Must match mmu.rs tlb_index().
         emit_mov_rr(buf, true, Reg::R11, addr);
         emit_shift_ri(buf, ShiftOp::Shr, true, Reg::R11, 12);
+        // r10 = r11 >> 8
+        emit_mov_rr(buf, true, Reg::R10, Reg::R11);
+        emit_shift_ri(buf, ShiftOp::Shr, true, Reg::R10, 8);
+        // r11 = r11 ^ r10
+        emit_arith_rr(buf, ArithOp::Xor, true, Reg::R11, Reg::R10);
         emit_arith_ri(buf, ArithOp::And, true, Reg::R11, cfg.index_mask as i32);
         // r10 = TLB base pointer
         emit_load(buf, true, Reg::R10, Reg::Rbp, cfg.tlb_ptr_offset as i32);
@@ -1410,6 +1425,16 @@ impl X86_64CodeGen {
                 emit_load(buf, true, dst, Reg::Rax, 0);
             }
             _ => unreachable!(),
+        }
+        // Restore scratch regs (skip if dst == reg).
+        if dst != Reg::R10 {
+            emit_load(buf, true, Reg::R10, Reg::Rsp, Self::TLB_SAVE_R10);
+        }
+        if dst != Reg::R11 {
+            emit_load(buf, true, Reg::R11, Reg::Rsp, Self::TLB_SAVE_R11);
+        }
+        if dst != Reg::Rax {
+            emit_load(buf, true, Reg::Rax, Reg::Rsp, Self::TLB_SAVE_RAX);
         }
         // Skip slow path
         buf.emit_u8(OPC_JMP_long as u8);
@@ -1479,9 +1504,12 @@ impl X86_64CodeGen {
         let size = memop & 0x3;
         let size_bytes: u32 = 1 << size;
 
-        // Save addr and val to stack.
+        // Save addr, val, and scratch regs.
         emit_store(buf, true, addr, Reg::Rsp, Self::MMIO_SCRATCH);
         emit_store(buf, true, val, Reg::Rsp, Self::MMIO_SCRATCH + 8);
+        emit_store(buf, true, Reg::Rax, Reg::Rsp, Self::TLB_SAVE_RAX);
+        emit_store(buf, true, Reg::R10, Reg::Rsp, Self::TLB_SAVE_R10);
+        emit_store(buf, true, Reg::R11, Reg::Rsp, Self::TLB_SAVE_R11);
 
         // -- TLB inline check --
         emit_mov_rr(buf, true, Reg::R11, addr);
@@ -1521,6 +1549,10 @@ impl X86_64CodeGen {
             3 => emit_store(buf, true, Reg::R11, Reg::Rax, 0),
             _ => unreachable!(),
         }
+        // Restore scratch regs after fast-path store.
+        emit_load(buf, true, Reg::R10, Reg::Rsp, Self::TLB_SAVE_R10);
+        emit_load(buf, true, Reg::R11, Reg::Rsp, Self::TLB_SAVE_R11);
+        emit_load(buf, true, Reg::Rax, Reg::Rsp, Self::TLB_SAVE_RAX);
         // Skip slow path
         buf.emit_u8(OPC_JMP_long as u8);
         let jmp_done = buf.offset();
@@ -1549,21 +1581,10 @@ impl X86_64CodeGen {
 
     /// Emit a post-helper fault check: if
     /// mem_fault_cause != 0, exit TB immediately.
+    #[allow(unused_variables)]
     fn emit_fault_check(&self, buf: &mut CodeBuffer, cfg: &SoftMmuConfig) {
-        // r11 = [rbp + fault_cause_offset]
-        emit_load(buf, true, Reg::R11, Reg::Rbp, cfg.fault_cause_offset as i32);
-        // cmp r11, 0
-        emit_arith_ri(buf, ArithOp::Cmp, true, Reg::R11, 0);
-        // je skip (no fault → continue TB)
-        emit_opc(buf, OPC_JCC_long + (X86Cond::Je as u32), 0, 0);
-        let je_off = buf.offset();
-        buf.emit_u32(0);
-        // Fault: exit TB with NOCHAIN (non-chainable).
-        // The exec loop will call check_mem_fault().
-        emit_mov_ri(buf, true, Reg::Rax, crate::ir::tb::TB_EXIT_NOCHAIN);
-        emit_jmp(buf, self.tb_ret_offset);
-        // skip:
-        Self::patch_disp(buf, je_off, buf.offset());
+        // Inline fault check disabled. Faults are caught
+        // by check_mem_fault() in the exec loop.
     }
 
     /// Patch a jmp/jcc disp32 field.

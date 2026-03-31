@@ -1497,10 +1497,12 @@ impl X86_64CodeGen {
         if imm <= i32::MAX as u64 {
             emit_arith_ri(buf, ArithOp::Cmp, true, addr, imm as i32);
         } else {
-            emit_store(buf, true, Reg::R11, Reg::Rsp, Self::MMIO_SCRATCH);
-            emit_mov_ri(buf, true, Reg::R11, imm);
-            emit_arith_rr(buf, ArithOp::Cmp, true, addr, Reg::R11);
-            emit_load(buf, true, Reg::R11, Reg::Rsp, Self::MMIO_SCRATCH);
+            // Pick a scratch that is NOT the addr reg.
+            let scratch = if addr == Reg::R11 { Reg::R10 } else { Reg::R11 };
+            emit_store(buf, true, scratch, Reg::Rsp, Self::MMIO_SCRATCH);
+            emit_mov_ri(buf, true, scratch, imm);
+            emit_arith_rr(buf, ArithOp::Cmp, true, addr, scratch);
+            emit_load(buf, true, scratch, Reg::Rsp, Self::MMIO_SCRATCH);
         }
     }
 }

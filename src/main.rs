@@ -104,7 +104,24 @@ fn parse_args() -> Result<CliArgs, String> {
     Ok(cli)
 }
 
+fn install_crash_handler() {
+    unsafe {
+        libc::signal(libc::SIGSEGV, crash_handler as *const () as usize);
+    }
+}
+
+extern "C" fn crash_handler(_sig: libc::c_int) {
+    let pc = machina_system::cpus::LAST_TB_PC.load(Ordering::Relaxed);
+    eprintln!(
+        "\nmachina: SIGSEGV in JIT code, \
+         last TB pc={:#x}",
+        pc,
+    );
+    std::process::exit(139);
+}
+
 fn main() {
+    install_crash_handler();
     let cli = match parse_args() {
         Ok(c) => c,
         Err(e) => {

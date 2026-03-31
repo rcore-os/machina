@@ -22,6 +22,9 @@ use machina_guest_riscv::{translator_loop, DisasJumpType, TranslatorOps};
 const NUM_GPRS: usize = 32;
 const RAM_BASE: u64 = 0x8000_0000;
 
+/// Last translated TB PC for crash diagnosis.
+pub static LAST_TB_PC: AtomicU64 = AtomicU64::new(0);
+
 /// Shared mip register for IRQ delivery from devices.
 pub type SharedMip = Arc<AtomicU64>;
 
@@ -96,6 +99,7 @@ impl GuestCpu for FullSystemCpu {
     }
 
     fn gen_code(&mut self, ir: &mut Context, pc: u64, max_insns: u32) -> u32 {
+        LAST_TB_PC.store(pc, Ordering::Relaxed);
         let base = (self.ram_ptr as usize).wrapping_sub(RAM_BASE as usize)
             as *const u8;
 
@@ -124,6 +128,18 @@ impl GuestCpu for FullSystemCpu {
                 d.gpr[i] = TempIdx(1 + i as u32);
             }
             d.pc = TempIdx(1 + NUM_GPRS as u32);
+            d.load_res = ir.new_global(
+                machina_accel::ir::types::Type::I64,
+                d.env,
+                machina_guest_riscv::riscv::cpu::LOAD_RES_OFFSET,
+                "load_res",
+            );
+            d.load_val = ir.new_global(
+                machina_accel::ir::types::Type::I64,
+                d.env,
+                machina_guest_riscv::riscv::cpu::LOAD_VAL_OFFSET,
+                "load_val",
+            );
             RiscvTranslator::tb_start(&mut d, ir);
             loop {
                 RiscvTranslator::insn_start(&mut d, ir);

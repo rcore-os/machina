@@ -39,3 +39,4 @@ machina-accel = { path = "accel" }
 machina-memory = { path = "memory" }
 machina-hw-riscv = { path = "hw/riscv" }
 machina-system = { path = "system" }
+libc = "0.2"

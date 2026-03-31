@@ -654,6 +654,9 @@ impl HostCodeGen for X86_64CodeGen {
                     }
                 }
             }
+            // Memory barrier: NOP on x86 (TSO provides
+            // sufficient ordering for single-hart use).
+            Opcode::Mb => {}
             Opcode::Call => {
                 let func = (cargs[1] as u64) << 32 | (cargs[0] as u64);
                 emit_mov_ri(buf, true, Reg::R11, func);

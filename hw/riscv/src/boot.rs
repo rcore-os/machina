@@ -153,11 +153,7 @@ pub fn boot_ref_machine(
     // Place DynamicInfo before FDT (8-byte aligned).
     let mut dynamic_info_addr: u64 = 0;
     if has_firmware {
-        let kernel_addr = if machine.kernel_path.is_some() {
-            RAM_BASE + KERNEL_OFFSET
-        } else {
-            RAM_BASE + KERNEL_OFFSET // default
-        };
+        let kernel_addr = RAM_BASE + KERNEL_OFFSET;
         let info = DynamicInfo::new(kernel_addr);
         let info_bytes = info.to_bytes();
         let info_offset = (fdt_offset - info_bytes.len() as u64) & !0x7;

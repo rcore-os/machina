@@ -291,10 +291,10 @@ impl GuestCpu for FullSystemCpu {
             _ => false,
         };
 
-        if do_write {
-            if self.cpu.csr.write(csr_addr, new_val, priv_level).is_err() {
-                return false;
-            }
+        if do_write
+            && self.cpu.csr.write(csr_addr, new_val, priv_level).is_err()
+        {
+            return false;
         }
 
         if rd != 0 {
@@ -339,6 +339,9 @@ fn ram_end_offset() -> usize {
     field - base
 }
 
+/// # Safety
+/// `env` must point to a valid `RiscvCpu` struct with
+/// initialized `as_ptr`, `ram_end`, and `guest_base`.
 #[no_mangle]
 pub unsafe extern "C" fn machina_mem_read(
     env: *mut u8,
@@ -369,6 +372,9 @@ pub unsafe extern "C" fn machina_mem_read(
     }
 }
 
+/// # Safety
+/// `env` must point to a valid `RiscvCpu` struct with
+/// initialized `as_ptr`, `ram_end`, and `guest_base`.
 #[no_mangle]
 pub unsafe extern "C" fn machina_mem_write(
     env: *mut u8,

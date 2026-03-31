@@ -206,13 +206,25 @@ fn main() {
     };
     cpu_mgr.add_cpu(fs_cpu);
 
-    // Wire SiFive Test shutdown to stop_flag + waker.
+    // Wire SiFive Test to execution control.
     {
+        use machina_hw_riscv::sifive_test::ShutdownReason;
         let flag = Arc::clone(&stop_flag);
         let wk = wfi_waker;
         machine
             .sifive_test()
-            .set_shutdown_handler(Box::new(move |_reason| {
+            .set_shutdown_handler(Box::new(move |reason| {
+                match reason {
+                    ShutdownReason::Pass => {
+                        eprintln!("machina: shutdown (pass)");
+                    }
+                    ShutdownReason::Reset => {
+                        eprintln!("machina: reset requested");
+                    }
+                    ShutdownReason::Fail(code) => {
+                        eprintln!("machina: fail (code {:#x})", code);
+                    }
+                }
                 flag.store(false, Ordering::SeqCst);
                 wk.stop();
             }));

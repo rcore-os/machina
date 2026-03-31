@@ -312,6 +312,7 @@ impl RefMachine {
         // Root node.
         fdt.begin_node("");
         fdt.property_string("compatible", "machina,riscv64-ref");
+        fdt.property_string("model", "Machina RISC-V Reference Platform");
         fdt.property_u32("#address-cells", 2);
         fdt.property_u32("#size-cells", 2);
 

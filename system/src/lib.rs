@@ -140,4 +140,31 @@ mod tests {
         let result = handle.join().unwrap();
         assert!(!result, "wait() must return false when stopped");
     }
+
+    #[test]
+    fn test_wfi_timer_only_wakeup() {
+        use std::time::{Duration, Instant};
+        let wk = Arc::new(WfiWaker::new());
+        let wk2 = wk.clone();
+        // Set a 20ms deadline.
+        wk.set_deadline(Instant::now() + Duration::from_millis(20));
+        let handle = std::thread::spawn(move || wk2.wait());
+        let result = handle.join().unwrap();
+        assert!(result, "wait() must return true on timer wakeup");
+    }
+
+    #[test]
+    fn test_wfi_irq_preempts_timer() {
+        use std::time::{Duration, Instant};
+        let wk = Arc::new(WfiWaker::new());
+        let wk2 = wk.clone();
+        // Set a long deadline (1 second).
+        wk.set_deadline(Instant::now() + Duration::from_secs(1));
+        let handle = std::thread::spawn(move || wk2.wait());
+        // IRQ arrives after 20ms — should preempt.
+        std::thread::sleep(Duration::from_millis(20));
+        wk.wake();
+        let result = handle.join().unwrap();
+        assert!(result, "wait() must return true on IRQ preempt");
+    }
 }

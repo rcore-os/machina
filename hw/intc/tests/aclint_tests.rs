@@ -176,3 +176,59 @@ fn test_aclint_clint_layout() {
         t
     );
 }
+
+#[test]
+fn test_aclint_mtimecmp_disable() {
+    let mut aclint = Aclint::new(1);
+    let sink = Arc::new(TestIrqSink::new(16));
+    let mti = 7u32;
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, mti);
+    aclint.connect_mti(0, line);
+
+    // Set mtimecmp to a near-future value, then disable.
+    aclint.write(0xBFF8, 8, 0);
+    aclint.write(0x4000, 8, 10);
+    aclint.write(0xBFF8, 8, 100);
+    assert!(sink.level(mti), "MTI should be high");
+
+    // Disable timer by setting mtimecmp to u64::MAX.
+    aclint.write(0x4000, 8, u64::MAX);
+    assert!(
+        !sink.level(mti),
+        "MTI should go low after mtimecmp=u64::MAX"
+    );
+}
+
+#[test]
+fn test_aclint_mtimecmp_retarget_past() {
+    let mut aclint = Aclint::new(1);
+    let sink = Arc::new(TestIrqSink::new(16));
+    let mti = 7u32;
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, mti);
+    aclint.connect_mti(0, line);
+
+    // Set mtime high, then set mtimecmp to past value.
+    aclint.write(0xBFF8, 8, 1000);
+    aclint.write(0x4000, 8, 500);
+    assert!(sink.level(mti), "MTI should be high when mtimecmp < mtime");
+}
+
+#[test]
+fn test_aclint_timer_thread_asserts_mti() {
+    let mut aclint = Aclint::new(1);
+    let sink = Arc::new(TestIrqSink::new(16));
+    let mti = 7u32;
+    let line = IrqLine::new(Arc::clone(&sink) as Arc<dyn IrqSink>, mti);
+    aclint.connect_mti(0, line);
+
+    // Set mtime near current wall clock, mtimecmp 10ms
+    // in the future. The timer thread should assert MTI.
+    let now = aclint.read(0xBFF8, 8);
+    aclint.write(0x4000, 8, now + 100_000); // 10ms
+
+    assert!(!sink.level(mti), "MTI should be low before deadline");
+
+    // Wait for timer thread to fire.
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    assert!(sink.level(mti), "MTI should be high after timer deadline");
+}

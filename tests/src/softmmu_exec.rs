@@ -726,8 +726,7 @@ fn test_slowpath_preserves_non_output_regs() {
     ]);
 
     let ram_sz = 2 * 1024 * 1024;
-    let (mut env, mut cpu, _as, _ram) =
-        setup_fullsys(ram_sz, &code);
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys(ram_sz, &code);
     cpu.cpu.pc = RAM_BASE;
 
     let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
@@ -744,4 +743,44 @@ fn test_slowpath_preserves_non_output_regs() {
          taken, proving x1 was not corrupted by the \
          second QemuLd's slow path"
     );
+}
+
+// ═══════════════════════════════════════════════════════
+// AC-11: Dual-page 32-bit instruction fetch
+// ═══════════════════════════════════════════════════════
+
+/// Test: 32-bit instruction crossing a 4K page boundary
+/// executes correctly via the cross-page fetch mechanism.
+///
+/// Place `addi x1, x0, 77` at address RAM_BASE+0xFFE
+/// (last 2 bytes of page 0, first 2 bytes of page 1).
+/// Follow with ecall at RAM_BASE+0x1002.
+#[test]
+fn test_fullsys_cross_page_fetch_success() {
+    let ram_size: u64 = 2 * 1024 * 1024;
+    let mut code = vec![0u8; ram_size as usize];
+
+    // Place a jump from 0x000 to 0xFFE.
+    let entry = encode(&[jal(0, 0xFFE)]);
+    code[0..4].copy_from_slice(&entry);
+
+    // Place the cross-page 32-bit instruction at 0xFFE.
+    let cross_insn = addi(1, 0, 77);
+    let cross_bytes = cross_insn.to_le_bytes();
+    code[0xFFE] = cross_bytes[0];
+    code[0xFFF] = cross_bytes[1];
+    code[0x1000] = cross_bytes[2];
+    code[0x1001] = cross_bytes[3];
+
+    // Place ecall at 0x1002.
+    let ec = ecall().to_le_bytes();
+    code[0x1002..0x1006].copy_from_slice(&ec);
+
+    let (mut env, mut cpu, _as, _ram) = setup_fullsys(ram_size, &code);
+    cpu.cpu.pc = RAM_BASE;
+
+    let r = unsafe { cpu_exec_loop_env(&mut env, &mut cpu) };
+
+    assert_eq!(r, ExitReason::Ecall { priv_level: 3 },);
+    assert_eq!(cpu.cpu.gpr[1], 77, "cross-page addi should set x1=77",);
 }

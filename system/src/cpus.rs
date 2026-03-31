@@ -247,14 +247,11 @@ impl GuestCpu for FullSystemCpu {
             .wrapping_add(phys_pc as usize)
             .wrapping_sub(pc as usize) as *const u8;
 
-        // AC-11 cross-page fetch infrastructure. The
-        // pre-fetch is computed but the translator
-        // currently handles page-boundary instructions
-        // by stopping the TB (AC-10 page limit).
-        // Full cross-page fetch for Sv39 needs the
-        // translator to be aware of the page boundary.
-        #[allow(clippy::overly_complex_bool_expr)]
-        let cross_page = if false && page_remain % 4 == 2 {
+        // AC-11: Pre-fetch cross-page 32-bit instruction.
+        // When the page has an odd number of halfwords
+        // (page_remain % 4 == 2), the last 2 bytes might
+        // be the first half of a 32-bit instruction.
+        let cross_page = if page_remain % 4 == 2 {
             // Last 2 bytes of the page might be the
             // first half of a 32-bit instruction.
             let boundary_off =
@@ -296,16 +293,26 @@ impl GuestCpu for FullSystemCpu {
 
         let cfg = RiscvCfg::default();
 
+        // The virtual PC of the boundary instruction
+        // (last 2 bytes of page A).
+        let xpage_pc = if cross_page != 0 {
+            pc + page_remain - 2
+        } else {
+            0
+        };
+
         if ir.nb_globals() == 0 {
             let mut d = RiscvDisasContext::new(pc, base, cfg);
             d.base.max_insns = limit;
             d.cross_page_insn = cross_page;
+            d.cross_page_pc = xpage_pc;
             translator_loop::<RiscvTranslator>(&mut d, ir);
             d.base.num_insns * 4
         } else {
             let mut d = RiscvDisasContext::new(pc, base, cfg);
             d.base.max_insns = limit;
             d.cross_page_insn = cross_page;
+            d.cross_page_pc = xpage_pc;
             d.env = TempIdx(0);
             for i in 0..NUM_GPRS {
                 d.gpr[i] = TempIdx(1 + i as u32);

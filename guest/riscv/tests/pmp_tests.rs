@@ -157,3 +157,39 @@ fn test_pmp_locked_restricts_m_mode() {
         .check_access(0x1000, 4, AccessType::Read, PrivLevel::Machine,)
         .is_ok());
 }
+
+// ── sync_from_csr integration ─────────────────────────────────
+
+#[test]
+fn test_pmp_sync_from_csr_tor_deny() {
+    use machina_guest_riscv::riscv::csr::PMP_COUNT;
+
+    let mut pmp = Pmp::new();
+    let mut pmpcfg = [0u64; 4];
+    let mut pmpaddr = [0u64; PMP_COUNT];
+
+    // Entry 0: OFF (addr boundary).
+    // Entry 1: TOR, R|W (no X), range [0, 0x400).
+    //   cfg byte = R|W | TOR = 0x01|0x02|0x08 = 0x0B
+    pmpcfg[0] = 0x0B << 8; // entry 1 in byte 1
+    pmpaddr[1] = 0x100; // addr >> 2 = 0x400 >> 2
+
+    pmp.sync_from_csr(&pmpcfg, &pmpaddr);
+
+    // S-mode read in range: allowed.
+    assert!(pmp
+        .check_access(0, 4, AccessType::Read, PrivLevel::Supervisor,)
+        .is_ok());
+
+    // S-mode execute in range: denied (no X).
+    assert_eq!(
+        pmp.check_access(0, 4, AccessType::Execute, PrivLevel::Supervisor,),
+        Err(Exception::InstructionAccessFault),
+    );
+
+    // S-mode read outside range: denied (no match).
+    assert_eq!(
+        pmp.check_access(0x500, 4, AccessType::Read, PrivLevel::Supervisor,),
+        Err(Exception::LoadAccessFault),
+    );
+}

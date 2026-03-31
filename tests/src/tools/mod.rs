@@ -231,3 +231,99 @@ fn boot_rustsbi_with_sbi_smoke_payload() {
         combined,
     );
 }
+
+fn sifive_pass_bin() -> PathBuf {
+    project_root().join("tests/firmware/sifive_pass.bin")
+}
+
+fn sifive_reset_bin() -> PathBuf {
+    project_root().join("tests/firmware/sifive_reset.bin")
+}
+
+/// SiFive Test PASS: bare-metal kernel writes 0x5555,
+/// machina should exit cleanly with code 0.
+#[test]
+fn sifive_test_pass_clean_exit() {
+    ensure_machina_built();
+    let child = Command::new(bin_path("machina"))
+        .args([
+            "-M",
+            "riscv64-ref",
+            "-m",
+            "128",
+            "-bios",
+            "none",
+            "-kernel",
+            sifive_pass_bin().to_str().unwrap(),
+            "-nographic",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("machina failed to start");
+    let output = child.wait_with_output().expect("wait failed");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        combined.contains("shutdown (pass)"),
+        "expected 'shutdown (pass)' in output.\n{}",
+        combined,
+    );
+    assert!(
+        output.status.success(),
+        "PASS must exit with code 0.\n\
+         status: {:?}\n{}",
+        output.status,
+        combined,
+    );
+}
+
+/// SiFive Test RESET: bare-metal kernel writes 0x3333,
+/// machina should reboot and re-enter execution loop.
+#[test]
+fn sifive_test_reset_reboots() {
+    ensure_machina_built();
+    let child = Command::new(bin_path("machina"))
+        .args([
+            "-M",
+            "riscv64-ref",
+            "-m",
+            "128",
+            "-bios",
+            "none",
+            "-kernel",
+            sifive_reset_bin().to_str().unwrap(),
+            "-nographic",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("machina failed to start");
+
+    // Give it 3 seconds to reboot a few times.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    // Kill the process (it will loop forever).
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+
+    let output = child.wait_with_output().expect("wait failed");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    // Must see at least 2 reboot cycles.
+    let reboot_count = combined.matches("reset, rebooting").count();
+    assert!(
+        reboot_count >= 2,
+        "expected >= 2 reboot cycles, got {}.\n{}",
+        reboot_count,
+        combined,
+    );
+}

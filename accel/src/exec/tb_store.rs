@@ -6,7 +6,7 @@ use crate::code_buffer::CodeBuffer;
 use crate::ir::tb::{TranslationBlock, TB_HASH_SIZE};
 use crate::HostCodeGen;
 
-const MAX_TBS: usize = 65536;
+const MAX_TBS: usize = 262144;
 
 /// Thread-safe storage and hash-table lookup for TBs.
 ///
@@ -245,6 +245,10 @@ impl TbStore {
 
     pub fn len(&self) -> usize {
         self.len.load(Ordering::Acquire)
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.len() >= MAX_TBS
     }
 
     pub fn is_empty(&self) -> bool {

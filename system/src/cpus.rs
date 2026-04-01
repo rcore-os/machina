@@ -14,6 +14,7 @@ use machina_accel::ir::context::Context;
 use machina_accel::ir::TempIdx;
 use machina_accel::GuestCpu;
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
+use machina_guest_riscv::riscv::csr::PrivLevel;
 use machina_guest_riscv::riscv::exception::Exception;
 use machina_guest_riscv::riscv::ext::RiscvCfg;
 use machina_guest_riscv::riscv::{RiscvDisasContext, RiscvTranslator};
@@ -21,6 +22,8 @@ use machina_guest_riscv::{translator_loop, DisasJumpType, TranslatorOps};
 
 const NUM_GPRS: usize = 32;
 pub const RAM_BASE: u64 = 0x8000_0000;
+const MSTATUS_SIE: u64 = 1 << 1;
+const MSTATUS_MIE: u64 = 1 << 3;
 
 /// Compute the byte offset of the TLB Box pointer from
 /// the start of RiscvCpu (env pointer). Used by the JIT
@@ -393,8 +396,32 @@ impl GuestCpu for FullSystemCpu {
 
     fn pending_interrupt(&self) -> bool {
         let dev_mip = self.shared_mip.load(Ordering::Relaxed);
-        let effective = self.cpu.csr.mip | dev_mip;
-        effective & self.cpu.csr.mie != 0
+        let pending = (self.cpu.csr.mip | dev_mip) & self.cpu.csr.mie;
+        if pending == 0 {
+            return false;
+        }
+
+        let cur_priv = self.cpu.priv_level as u64;
+        for irq in [11u64, 3, 7, 9, 1, 5] {
+            let bit = 1u64 << irq;
+            if pending & bit == 0 {
+                continue;
+            }
+
+            let delegated = (self.cpu.csr.mideleg >> irq) & 1 != 0;
+            if delegated {
+                let s = PrivLevel::Supervisor as u64;
+                return cur_priv < s
+                    || (cur_priv == s
+                        && self.cpu.csr.mstatus & MSTATUS_SIE != 0);
+            }
+
+            let m = PrivLevel::Machine as u64;
+            return cur_priv < m
+                || (cur_priv == m && self.cpu.csr.mstatus & MSTATUS_MIE != 0);
+        }
+
+        false
     }
 
     fn is_halted(&self) -> bool {
@@ -552,9 +579,20 @@ impl GuestCpu for FullSystemCpu {
             }
         };
 
-        let old = match self.cpu.csr.read(csr_addr, priv_level) {
-            Ok(v) => v,
-            Err(_) => return false,
+        let old = match csr_addr {
+            machina_guest_riscv::riscv::csr::CSR_TIME => {
+                self.read_aclint_mtime()
+            }
+            machina_guest_riscv::riscv::csr::CSR_CYCLE => {
+                self.read_aclint_mtime()
+            }
+            machina_guest_riscv::riscv::csr::CSR_INSTRET => {
+                self.cpu.csr.instret
+            }
+            _ => match self.cpu.csr.read(csr_addr, priv_level) {
+                Ok(v) => v,
+                Err(_) => return false,
+            },
         };
 
         // Compute new value based on funct3.
@@ -605,6 +643,17 @@ impl GuestCpu for FullSystemCpu {
 
         self.cpu.pc += 4;
         true
+    }
+}
+
+impl FullSystemCpu {
+    fn read_aclint_mtime(&self) -> u64 {
+        const ACLINT_MTIME: u64 = 0x0200_BFF8;
+        let as_ptr = self.cpu.as_ptr as *const AddressSpace;
+        if as_ptr.is_null() {
+            return 0;
+        }
+        unsafe { (&*as_ptr).read(GPA::new(ACLINT_MTIME), 8) }
     }
 }
 
@@ -782,6 +831,18 @@ unsafe fn write_phys(cpu: *mut RiscvCpu, pa: u64, val: u64) {
     write_phys_sized(cpu, pa, val, 8);
 }
 
+fn is_phys_backed(cpu: &RiscvCpu, pa: u64, size: u32) -> bool {
+    if pa >= RAM_BASE && pa.checked_add(size as u64).is_some_and(|end| end <= cpu.ram_end) {
+        return true;
+    }
+    let asp = cpu.as_ptr;
+    if asp == 0 {
+        return false;
+    }
+    let as_ = unsafe { &*(asp as *const AddressSpace) };
+    as_.is_mapped(GPA::new(pa), size)
+}
+
 /// JIT slow path: guest load (TLB miss or MMIO).
 ///
 /// Receives a guest virtual address, translates through
@@ -797,7 +858,14 @@ pub unsafe extern "C" fn machina_mem_read(
 ) -> u64 {
     let cpu = &mut *(env as *mut RiscvCpu);
     match translate_for_helper(cpu, gva, AccessType::Read, size) {
-        Some(pa) => read_phys_sized(cpu, pa, size),
+        Some(pa) => {
+            if !is_phys_backed(cpu, pa, size) {
+                cpu.mem_fault_cause = 5;
+                cpu.mem_fault_tval = gva;
+                return 0;
+            }
+            read_phys_sized(cpu, pa, size)
+        }
         None => 0,
     }
 }
@@ -815,6 +883,11 @@ pub unsafe extern "C" fn machina_mem_write(
 ) {
     let cpu = &mut *(env as *mut RiscvCpu);
     if let Some(pa) = translate_for_helper(cpu, gva, AccessType::Write, size) {
+        if !is_phys_backed(cpu, pa, size) {
+            cpu.mem_fault_cause = 7;
+            cpu.mem_fault_tval = gva;
+            return;
+        }
         write_phys_sized(cpu, pa, val, size);
     }
 }

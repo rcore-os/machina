@@ -115,6 +115,21 @@ impl AddressSpace {
         }
     }
 
+    /// Return whether the full byte range `[addr, addr + size)` is mapped.
+    pub fn is_mapped(&self, addr: GPA, size: u32) -> bool {
+        debug_assert!(
+            matches!(size, 1 | 2 | 4 | 8),
+            "unsupported access size {size}"
+        );
+        let fv = self.flat_view.read().unwrap();
+        let Some(fr) = fv.lookup(addr) else {
+            return false;
+        };
+        addr.0
+            .checked_add(size as u64)
+            .is_some_and(|end| end <= fr.addr.0 + fr.size)
+    }
+
     // ----- convenience accessors -----
 
     pub fn read_u32(&self, addr: GPA) -> u32 {

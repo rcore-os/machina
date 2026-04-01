@@ -315,9 +315,7 @@ where
     B: HostCodeGen,
     C: GuestCpu<IrContext = Context>,
 {
-    if shared.code_buf().remaining() < MIN_CODE_BUF_REMAINING
-        || shared.tb_store.is_full()
-    {
+    if shared.code_buf().remaining() < MIN_CODE_BUF_REMAINING {
         return None;
     }
 
@@ -329,12 +327,6 @@ where
     if let Some(idx) = shared.tb_store.lookup(pc, flags) {
         per_cpu.jump_cache.insert(pc, idx);
         return Some(idx);
-    }
-
-    if shared.tb_store.is_full()
-        || shared.code_buf().remaining() < MIN_CODE_BUF_REMAINING
-    {
-        return None;
     }
 
     // SAFETY: we hold translate_lock, so exclusive access to

@@ -1,7 +1,7 @@
 use machina_core::address::GPA;
 use machina_core::machine::{Machine, MachineOpts};
 use machina_guest_riscv::riscv::csr::PrivLevel;
-use machina_hw_riscv::ref_machine::{RefMachine, RAM_BASE};
+use machina_hw_riscv::ref_machine::{RefMachine, MROM_BASE, RAM_BASE};
 
 fn default_opts() -> MachineOpts {
     MachineOpts {
@@ -107,7 +107,6 @@ fn test_ref_machine_zero_ram_fails() {
 #[test]
 fn test_ref_machine_boot_bios_none() {
     let mut m = RefMachine::new();
-    // Explicitly set -bios none for bare-metal.
     let opts = MachineOpts {
         bios: Some("none".into()),
         ..default_opts()
@@ -117,11 +116,10 @@ fn test_ref_machine_boot_bios_none() {
 
     let cpus = m.cpus_lock();
     let cpu = cpus[0].as_ref().unwrap();
-    assert_eq!(cpu.pc, RAM_BASE);
+    // CPU starts at MROM base; reset vector will set
+    // a0/a1/a2 at runtime.
+    assert_eq!(cpu.pc, MROM_BASE);
     assert_eq!(cpu.priv_level, PrivLevel::Machine);
-    assert_eq!(cpu.gpr[10], 0); // a0 = hart_id
-                                // a2 = 0 (no DynamicInfo in bare-metal mode).
-    assert_eq!(cpu.gpr[12], 0);
 }
 
 // ---- New tests ----
@@ -212,9 +210,9 @@ fn test_ref_machine_boot_cpu_state() {
 
     let cpus = m.cpus_lock();
     let cpu = cpus[0].as_ref().unwrap();
-    assert_eq!(cpu.gpr[10], 0); // a0 = hart_id
-    assert!(cpu.gpr[11] >= RAM_BASE, "fdt_addr below RAM_BASE");
-    assert_eq!(cpu.pc, RAM_BASE);
+    // CPU starts at MROM; a0/a1 are set by reset vector.
+    assert_eq!(cpu.pc, MROM_BASE);
+    assert_eq!(cpu.priv_level, PrivLevel::Machine);
 }
 
 #[test]
@@ -294,9 +292,7 @@ fn test_boot_sets_cpu_state() {
 
     let cpus = m.cpus_lock();
     let cpu = cpus[0].as_ref().unwrap();
-    assert_eq!(cpu.gpr[10], 0, "a0 = hart_id=0");
-    assert!(cpu.gpr[11] >= RAM_BASE, "a1 = fdt_addr within RAM");
-    assert_eq!(cpu.pc, RAM_BASE, "pc = RAM_BASE");
+    assert_eq!(cpu.pc, MROM_BASE, "pc = MROM_BASE");
     assert_eq!(
         cpu.priv_level,
         PrivLevel::Machine,
@@ -314,18 +310,13 @@ fn test_take_cpu_preserves_boot_state() {
     m.init(&opts).expect("init failed");
     m.boot().expect("boot failed");
 
-    // take_cpu returns CPU with boot state intact.
     let cpu = m.take_cpu(0).expect("take_cpu failed");
-    assert_eq!(cpu.pc, RAM_BASE, "pc preserved");
-    assert_eq!(cpu.gpr[10], 0, "a0 preserved");
-    assert!(cpu.gpr[11] >= RAM_BASE, "a1 preserved");
+    assert_eq!(cpu.pc, MROM_BASE, "pc preserved");
     assert_eq!(cpu.priv_level, PrivLevel::Machine, "priv preserved");
 
-    // After take, slot 0 is None.
     let cpus = m.cpus_lock();
     assert!(cpus[0].is_none(), "cpus[0] must be None after take");
 
-    // Second take returns None.
     drop(cpus);
     assert!(m.take_cpu(0).is_none(), "double take must return None");
 }
@@ -402,6 +393,46 @@ fn test_irq_updates_cpu_mip() {
         0,
         "MEI should be cleared after IRQ lower"
     );
+}
+
+// ---- MROM / reset vector tests ----
+
+#[test]
+fn test_mrom_reset_vector_content() {
+    let mut m = RefMachine::new();
+    let opts = MachineOpts {
+        bios: Some("none".into()),
+        ..default_opts()
+    };
+    m.init(&opts).expect("init failed");
+    m.boot().expect("boot failed");
+
+    let as_ = m.address_space();
+    // First instruction: auipc t0, 0 → 0x00000297.
+    let insn0 = as_.read(GPA::new(MROM_BASE), 4) as u32;
+    assert_eq!(insn0, 0x0000_0297, "auipc t0, 0");
+    // Second: addi a2, t0, 0x28 → 0x02828613.
+    let insn1 = as_.read(GPA::new(MROM_BASE + 4), 4) as u32;
+    assert_eq!(insn1, 0x0282_8613, "addi a2, t0, 0x28");
+    // Third: csrr a0, mhartid → 0xf1402573.
+    let insn2 = as_.read(GPA::new(MROM_BASE + 8), 4) as u32;
+    assert_eq!(insn2, 0xf140_2573, "csrr a0, mhartid");
+    // Sixth: jr t0 → 0x00028067.
+    let insn5 = as_.read(GPA::new(MROM_BASE + 0x14), 4) as u32;
+    assert_eq!(insn5, 0x0002_8067, "jr t0");
+
+    // start_addr at offset 0x18 (dword): should be
+    // RAM_BASE for -bios none.
+    let start = as_.read(GPA::new(MROM_BASE + 0x18), 8);
+    assert_eq!(start, RAM_BASE, "start_addr = RAM_BASE");
+
+    // fdt_addr at offset 0x20 (dword): within RAM.
+    let fdt = as_.read(GPA::new(MROM_BASE + 0x20), 8);
+    assert!(fdt >= RAM_BASE, "fdt_addr within RAM");
+
+    // fw_dynamic_info magic at offset 0x28.
+    let magic = as_.read(GPA::new(MROM_BASE + 0x28), 8);
+    assert_eq!(magic, 0x4942534f, "OSBI magic");
 }
 
 // ---- SiFive Test regressions ----

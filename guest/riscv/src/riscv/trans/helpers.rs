@@ -294,7 +294,10 @@ impl RiscvDisasContext {
                 ir.gen_ld(Type::I64, v, self.env, UIP_OFFSET);
                 Some(v)
             }
-            CSR_CYCLE | CSR_TIME | CSR_INSTRET => None,
+            CSR_CYCLE | CSR_TIME | CSR_INSTRET => {
+                let v = ir.new_const(Type::I64, 0);
+                Some(v)
+            }
             _ => None,
         }
     }

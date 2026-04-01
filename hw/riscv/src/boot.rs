@@ -1,25 +1,24 @@
 // Boot setup for the riscv64-ref machine.
 //
-// CPU boot convention (matches OpenSBI / QEMU virt):
-//   a0 = hart_id
-//   a1 = fdt_addr (guest physical)
-//   a2 = dynamic_info_addr (for fw_dynamic firmware)
-//   PC = entry_pc
-//   privilege = Machine mode
+// QEMU virt boot convention:
+//   CPU starts at PC = 0x1000 (MROM base).
+//   MROM contains a reset vector that sets:
+//     a0 = mhartid
+//     a1 = fdt_addr
+//     a2 = &fw_dynamic_info
+//   then jumps to start_addr (firmware or kernel entry).
 
 use machina_core::address::GPA;
 use machina_core::machine::Machine;
 use machina_guest_riscv::riscv::csr::PrivLevel;
 use machina_hw_core::loader;
 
-use crate::ref_machine::{RefMachine, RAM_BASE};
+use crate::ref_machine::{RefMachine, MROM_BASE, RAM_BASE};
 
 /// Kernel is loaded 2 MiB above RAM_BASE.
 pub const KERNEL_OFFSET: u64 = 0x20_0000;
 
 /// Default embedded firmware (fw_dynamic.bin).
-/// This is included at compile time from pc-bios/.
-/// When pc-bios/ doesn't exist yet, use an empty slice.
 #[cfg(feature = "embed-firmware")]
 const EMBEDDED_FW: &[u8] =
     include_bytes!("../../../pc-bios/rustsbi-riscv64-machina-fw_dynamic.bin");
@@ -27,8 +26,7 @@ const EMBEDDED_FW: &[u8] =
 #[cfg(not(feature = "embed-firmware"))]
 const EMBEDDED_FW: &[u8] = &[];
 
-/// OpenSBI-compatible DynamicInfo structure.
-/// Passed to fw_dynamic firmware via a2 register.
+/// OpenSBI-compatible DynamicInfo structure (RV64).
 #[repr(C)]
 pub struct DynamicInfo {
     pub magic: u64,
@@ -43,14 +41,14 @@ const DYNAMIC_INFO_MAGIC: u64 = 0x4942534f; // "OSBI"
 const DYNAMIC_INFO_VERSION: u64 = 2;
 
 impl DynamicInfo {
-    pub fn new(next_addr: u64) -> Self {
+    pub fn new(next_addr: u64, next_mode: u64) -> Self {
         Self {
             magic: DYNAMIC_INFO_MAGIC,
             version: DYNAMIC_INFO_VERSION,
             next_addr,
-            next_mode: 1, // S-mode
+            next_mode,
             options: 0,
-            boot_hart: u64::MAX, // any hart
+            boot_hart: 0,
         }
     }
 
@@ -66,21 +64,10 @@ impl DynamicInfo {
     }
 }
 
-/// Addresses and entry point produced by boot setup.
-pub struct BootInfo {
-    pub entry_pc: u64,
-    pub fdt_addr: u64,
-    pub hart_id: u32,
-    pub dynamic_info_addr: u64,
-}
-
 /// Resolve the bios source: embedded, file, or none.
 enum BiosSource<'a> {
-    /// No firmware: bare-metal M-mode.
     None,
-    /// Load from file path.
     File(&'a std::path::Path),
-    /// Use embedded default firmware.
     Embedded,
 }
 
@@ -88,7 +75,9 @@ fn is_elf(data: &[u8]) -> bool {
     data.len() >= 4 && data[0..4] == [0x7f, b'E', b'L', b'F']
 }
 
-fn resolve_bios(bios_path: &Option<std::path::PathBuf>) -> BiosSource<'_> {
+fn resolve_bios(
+    bios_path: &Option<std::path::PathBuf>,
+) -> BiosSource<'_> {
     match bios_path {
         Some(p) => {
             let s = p.to_str().unwrap_or("");
@@ -98,20 +87,85 @@ fn resolve_bios(bios_path: &Option<std::path::PathBuf>) -> BiosSource<'_> {
                 BiosSource::File(p)
             }
         }
-        // No -bios flag: use embedded firmware.
         None => BiosSource::Embedded,
     }
 }
 
-/// Real boot path for RefMachine: load bios/kernel,
-/// place FDT and DynamicInfo, set CPU0 boot state.
+/// Write QEMU-compatible reset vector into MROM.
+///
+/// Layout at MROM_BASE (0x1000):
+///   0x00: auipc  t0, %pcrel_hi(fw_dyn)   // 0x00000297
+///   0x04: addi   a2, t0, %pcrel_lo(1b)    // 0x02828613
+///   0x08: csrr   a0, mhartid              // 0xf1402573
+///   0x0c: ld     a1, 32(t0)               // 0x0202b583
+///   0x10: ld     t0, 24(t0)               // 0x0182b283
+///   0x14: jr     t0                       // 0x00028067
+///   0x18: .dword start_addr
+///   0x20: .dword fdt_load_addr
+///   0x28: fw_dynamic_info (48 bytes)
+fn write_mrom(
+    machine: &RefMachine,
+    start_addr: u64,
+    fdt_addr: u64,
+    kernel_entry: u64,
+    has_firmware: bool,
+) {
+    // RV64 reset vector (matches QEMU exactly).
+    let reset_vec: [u32; 10] = [
+        0x0000_0297, // auipc  t0, %pcrel_hi(fw_dyn)
+        0x0282_8613, // addi   a2, t0, %pcrel_lo(1b)
+        0xf140_2573, // csrr   a0, mhartid
+        0x0202_b583, // ld     a1, 32(t0)
+        0x0182_b283, // ld     t0, 24(t0)
+        0x0002_8067, // jr     t0
+        start_addr as u32,
+        (start_addr >> 32) as u32,
+        fdt_addr as u32,
+        (fdt_addr >> 32) as u32,
+    ];
+
+    let mrom = machine.mrom_block();
+    let ptr = mrom.as_ptr();
+
+    // Write reset vector instructions + data.
+    for (i, &word) in reset_vec.iter().enumerate() {
+        let bytes = word.to_le_bytes();
+        unsafe {
+            let dst = ptr.add(i * 4);
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                dst,
+                4,
+            );
+        }
+    }
+
+    // Write fw_dynamic_info right after the reset vector
+    // (offset 0x28 = 40 bytes).
+    let next_mode = if has_firmware { 1u64 } else { 3u64 };
+    let dinfo = DynamicInfo::new(kernel_entry, next_mode);
+    let dinfo_bytes = dinfo.to_bytes();
+    unsafe {
+        let dst = ptr.add(40);
+        std::ptr::copy_nonoverlapping(
+            dinfo_bytes.as_ptr(),
+            dst,
+            dinfo_bytes.len(),
+        );
+    }
+}
+
+/// Boot the riscv64-ref machine.
+///
+/// Loads firmware/kernel, places FDT and reset vector,
+/// sets CPU0 to start at MROM (PC = 0x1000).
 pub fn boot_ref_machine(
     machine: &mut RefMachine,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let bios_source = resolve_bios(&machine.bios_path);
     let has_firmware = !matches!(bios_source, BiosSource::None);
 
-    // Load firmware: try ELF first, fall back to raw binary.
+    // Load firmware.
     let mut fw_entry: Option<u64> = None;
     match bios_source {
         BiosSource::File(path) => {
@@ -119,39 +173,68 @@ pub fn boot_ref_machine(
             let as_ = machine.address_space();
             if is_elf(&data) {
                 let info = loader::load_elf(&data, as_)
-                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+                    .map_err(|e| -> Box<dyn std::error::Error> {
+                        e.into()
+                    })?;
                 fw_entry = Some(info.entry.0);
             } else {
-                loader::load_binary(&data, GPA::new(RAM_BASE), as_)
-                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+                loader::load_binary(
+                    &data,
+                    GPA::new(RAM_BASE),
+                    as_,
+                )
+                .map_err(|e| -> Box<dyn std::error::Error> {
+                    e.into()
+                })?;
             }
         }
         BiosSource::Embedded => {
             if EMBEDDED_FW.is_empty() {
-                return Err("no embedded firmware available; \
+                return Err(
+                    "no embedded firmware available; \
                      use -bios <path> or build with \
                      embed-firmware feature"
-                    .into());
+                        .into(),
+                );
             }
             let as_ = machine.address_space();
-            loader::load_binary(EMBEDDED_FW, GPA::new(RAM_BASE), as_)
-                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            loader::load_binary(
+                EMBEDDED_FW,
+                GPA::new(RAM_BASE),
+                as_,
+            )
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                e.into()
+            })?;
         }
         BiosSource::None => {}
     }
 
-    // Load kernel: try ELF first, fall back to raw binary.
+    // Load kernel.
     let mut kernel_entry: Option<u64> = None;
     if let Some(ref kernel_path) = machine.kernel_path {
         let data = std::fs::read(kernel_path)?;
         let as_ = machine.address_space();
+        let load_addr = if has_firmware {
+            RAM_BASE + KERNEL_OFFSET
+        } else {
+            RAM_BASE
+        };
         if is_elf(&data) {
             let info = loader::load_elf(&data, as_)
-                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+                .map_err(|e| -> Box<dyn std::error::Error> {
+                    e.into()
+                })?;
             kernel_entry = Some(info.entry.0);
         } else {
-            loader::load_binary(&data, GPA::new(RAM_BASE + KERNEL_OFFSET), as_)
-                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            loader::load_binary(
+                &data,
+                GPA::new(load_addr),
+                as_,
+            )
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                e.into()
+            })?;
         }
     }
 
@@ -166,39 +249,42 @@ pub fn boot_ref_machine(
     let fdt_addr = RAM_BASE + fdt_offset;
     let as_ = machine.address_space();
     loader::load_binary(&fdt, GPA::new(fdt_addr), as_)
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        .map_err(|e| -> Box<dyn std::error::Error> {
+            e.into()
+        })?;
 
-    // Place DynamicInfo before FDT (8-byte aligned).
-    let mut dynamic_info_addr: u64 = 0;
-    if has_firmware {
-        let kernel_addr = RAM_BASE + KERNEL_OFFSET;
-        let info = DynamicInfo::new(kernel_addr);
-        let info_bytes = info.to_bytes();
-        let info_offset = (fdt_offset - info_bytes.len() as u64) & !0x7;
-        dynamic_info_addr = RAM_BASE + info_offset;
-        let as_ = machine.address_space();
-        loader::load_binary(&info_bytes, GPA::new(dynamic_info_addr), as_)
-            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    }
+    // Compute start_addr for reset vector jump target.
+    let start_addr = if let Some(entry) = fw_entry {
+        entry
+    } else if has_firmware {
+        RAM_BASE
+    } else if let Some(entry) = kernel_entry {
+        entry
+    } else if machine.kernel_path.is_some() {
+        if has_firmware {
+            RAM_BASE + KERNEL_OFFSET
+        } else {
+            RAM_BASE
+        }
+    } else {
+        RAM_BASE
+    };
 
-    // Set CPU0 boot state.
+    // Compute kernel_entry for fw_dynamic_info.next_addr.
+    let dinfo_next = if has_firmware {
+        kernel_entry.unwrap_or(RAM_BASE + KERNEL_OFFSET)
+    } else {
+        start_addr
+    };
+
+    // Write MROM: reset vector + fw_dynamic_info.
+    write_mrom(machine, start_addr, fdt_addr, dinfo_next, has_firmware);
+
+    // CPU0 starts at MROM base in M-mode.
     {
         let mut cpus = machine.cpus_lock();
         if let Some(Some(cpu)) = cpus.get_mut(0) {
-            cpu.gpr[10] = 0; // a0 = hart_id
-            cpu.gpr[11] = fdt_addr; // a1 = fdt_addr
-            cpu.gpr[12] = dynamic_info_addr; // a2
-            if let Some(entry) = fw_entry {
-                cpu.pc = entry;
-            } else if has_firmware {
-                cpu.pc = RAM_BASE;
-            } else if let Some(entry) = kernel_entry {
-                cpu.pc = entry;
-            } else if machine.kernel_path.is_some() {
-                cpu.pc = RAM_BASE + KERNEL_OFFSET;
-            } else {
-                cpu.pc = RAM_BASE;
-            }
+            cpu.pc = MROM_BASE;
             cpu.set_priv(PrivLevel::Machine);
         }
     }

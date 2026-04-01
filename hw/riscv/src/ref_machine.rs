@@ -23,6 +23,7 @@ use machina_memory::region::{MemoryRegion, MmioOps};
 use crate::sifive_test::SifiveTest;
 
 // QEMU virt memory map base addresses.
+pub const MROM_BASE: u64 = 0x0000_1000;
 const SIFIVE_TEST_BASE: u64 = 0x0010_0000;
 const PLIC_BASE: u64 = 0x0C00_0000;
 const ACLINT_BASE: u64 = 0x0200_0000;
@@ -30,6 +31,7 @@ const UART0_BASE: u64 = 0x1000_0000;
 pub const RAM_BASE: u64 = 0x8000_0000;
 
 // Region sizes.
+pub const MROM_SIZE: u64 = 0x0000_F000;
 const SIFIVE_TEST_SIZE: u64 = 0x1000;
 const PLIC_SIZE: u64 = 0x0400_0000;
 const ACLINT_SIZE: u64 = 0x0001_0000;
@@ -163,6 +165,7 @@ pub struct RefMachine {
     cpu_count: u32,
     address_space: Option<AddressSpace>,
     ram_block: Option<Arc<RamBlock>>,
+    mrom_block: Option<Arc<RamBlock>>,
     plic: Option<Arc<Mutex<Plic>>>,
     aclint: Option<Arc<Mutex<Aclint>>>,
     uart: Option<Arc<Mutex<Uart16550>>>,
@@ -189,6 +192,7 @@ impl RefMachine {
             cpu_count: 0,
             address_space: None,
             ram_block: None,
+            mrom_block: None,
             plic: None,
             aclint: None,
             uart: None,
@@ -227,6 +231,12 @@ impl RefMachine {
 
     pub fn ram_block(&self) -> &Arc<RamBlock> {
         self.ram_block.as_ref().expect("machine not initialized")
+    }
+
+    pub fn mrom_block(&self) -> &Arc<RamBlock> {
+        self.mrom_block
+            .as_ref()
+            .expect("machine not initialized")
     }
 
     pub fn fdt_blob(&self) -> &[u8] {
@@ -519,6 +529,12 @@ impl Machine for RefMachine {
         );
         root.add_subregion(st_region, GPA::new(SIFIVE_TEST_BASE));
         self.sifive_test = Some(sifive_test);
+
+        // MROM at 0x1000 (mask ROM for reset vector).
+        let (mrom_region, mrom_block) =
+            MemoryRegion::ram("mrom", MROM_SIZE);
+        self.mrom_block = Some(mrom_block);
+        root.add_subregion(mrom_region, GPA::new(MROM_BASE));
 
         self.address_space = Some(AddressSpace::new(root));
 

@@ -176,7 +176,7 @@ fn run_machine_cycle(
     cpu_mgr.set_wfi_waker(wfi_waker.clone());
 
     let stop_flag = cpu_mgr.running_flag();
-    let fs_cpu = unsafe {
+    let mut fs_cpu = unsafe {
         FullSystemCpu::new(
             cpu0,
             ram_ptr,
@@ -187,6 +187,13 @@ fn run_machine_cycle(
             Arc::clone(&stop_flag),
         )
     };
+    // Register MROM for instruction fetch at 0x1000.
+    {
+        use machina_hw_riscv::ref_machine::{MROM_BASE, MROM_SIZE};
+        let mrom_ptr =
+            machine.mrom_block().as_ptr() as *const u8;
+        fs_cpu.set_mrom(mrom_ptr, MROM_BASE, MROM_SIZE);
+    }
     cpu_mgr.add_cpu(fs_cpu);
 
     // Wire SiFive Test to execution control.

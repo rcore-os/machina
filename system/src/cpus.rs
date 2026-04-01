@@ -14,7 +14,6 @@ use machina_accel::ir::context::Context;
 use machina_accel::ir::TempIdx;
 use machina_accel::GuestCpu;
 use machina_guest_riscv::riscv::cpu::RiscvCpu;
-use machina_guest_riscv::riscv::csr::PrivLevel;
 use machina_guest_riscv::riscv::exception::Exception;
 use machina_guest_riscv::riscv::ext::RiscvCfg;
 use machina_guest_riscv::riscv::{RiscvDisasContext, RiscvTranslator};
@@ -22,8 +21,6 @@ use machina_guest_riscv::{translator_loop, DisasJumpType, TranslatorOps};
 
 const NUM_GPRS: usize = 32;
 pub const RAM_BASE: u64 = 0x8000_0000;
-const MSTATUS_SIE: u64 = 1 << 1;
-const MSTATUS_MIE: u64 = 1 << 3;
 
 /// Compute the byte offset of the TLB Box pointer from
 /// the start of RiscvCpu (env pointer). Used by the JIT
@@ -83,6 +80,9 @@ pub struct FullSystemCpu {
     pub cpu: RiscvCpu,
     ram_ptr: *const u8,
     ram_size: u64,
+    mrom_ptr: *const u8,
+    mrom_base: u64,
+    mrom_size: u64,
     shared_mip: SharedMip,
     wfi_waker: Arc<WfiWaker>,
     stop_flag: Arc<AtomicBool>,
@@ -117,10 +117,48 @@ impl FullSystemCpu {
             cpu,
             ram_ptr,
             ram_size,
+            mrom_ptr: std::ptr::null(),
+            mrom_base: 0,
+            mrom_size: 0,
             shared_mip,
             wfi_waker,
             stop_flag,
         }
+    }
+
+    /// Resolve a physical address to (host_ptr, base, size)
+    /// for instruction fetch.
+    fn resolve_fetch_region(
+        &self,
+        pa: u64,
+    ) -> (*const u8, u64, u64) {
+        let ram_off = pa.wrapping_sub(RAM_BASE);
+        if ram_off < self.ram_size {
+            return (self.ram_ptr, RAM_BASE, self.ram_size);
+        }
+        if !self.mrom_ptr.is_null() {
+            let mrom_off = pa.wrapping_sub(self.mrom_base);
+            if mrom_off < self.mrom_size {
+                return (
+                    self.mrom_ptr,
+                    self.mrom_base,
+                    self.mrom_size,
+                );
+            }
+        }
+        (std::ptr::null(), 0, 0)
+    }
+
+    /// Register MROM region for instruction fetch.
+    pub fn set_mrom(
+        &mut self,
+        ptr: *const u8,
+        base: u64,
+        size: u64,
+    ) {
+        self.mrom_ptr = ptr;
+        self.mrom_base = base;
+        self.mrom_size = size;
     }
 
     /// Translate a virtual PC to physical address for
@@ -218,19 +256,39 @@ impl GuestCpu for FullSystemCpu {
         // Store phys_pc for the exec loop to record in TB.
         self.cpu.last_phys_pc = phys_pc;
 
-        let phys_offset = phys_pc.wrapping_sub(RAM_BASE);
-        if phys_offset >= self.ram_size {
-            // PC outside RAM: latch fetch fault.
-            self.cpu.mem_fault_cause = 1;
-            self.cpu.mem_fault_tval = pc;
-            return 0;
-        }
+        // Resolve phys_pc to host pointer and region size.
+        let (region_ptr, region_base, region_size) = {
+            let ram_off = phys_pc.wrapping_sub(RAM_BASE);
+            if ram_off < self.ram_size {
+                (self.ram_ptr, RAM_BASE, self.ram_size)
+            } else if !self.mrom_ptr.is_null() {
+                let mrom_off =
+                    phys_pc.wrapping_sub(self.mrom_base);
+                if mrom_off < self.mrom_size {
+                    (
+                        self.mrom_ptr,
+                        self.mrom_base,
+                        self.mrom_size,
+                    )
+                } else {
+                    self.cpu.mem_fault_cause = 1;
+                    self.cpu.mem_fault_tval = pc;
+                    return 0;
+                }
+            } else {
+                self.cpu.mem_fault_cause = 1;
+                self.cpu.mem_fault_tval = pc;
+                return 0;
+            }
+        };
+        let phys_offset = phys_pc.wrapping_sub(region_base);
 
         // TB must not cross physical page boundary
         // (AC-10). Limit avail to remaining bytes in
         // the current 4K page.
         let page_remain = 4096 - (phys_pc & 0xFFF);
-        let avail_bytes = page_remain.min(self.ram_size - phys_offset);
+        let avail_bytes =
+            page_remain.min(region_size - phys_offset);
         // Allow 2-byte (compressed) instructions.
         let avail = avail_bytes / 2;
         let limit = max_insns.min(avail as u32);
@@ -239,13 +297,9 @@ impl GuestCpu for FullSystemCpu {
         }
 
         // Use phys_pc-based pointer for instruction fetch.
-        let base = (self.ram_ptr as usize).wrapping_sub(RAM_BASE as usize)
+        let base = (region_ptr as usize)
+            .wrapping_sub(region_base as usize)
             as *const u8;
-        // Offset: the translator fetches from
-        // base + pc_next. Since pc_next is the virtual
-        // address, we need base such that
-        // base + vpc = ram_ptr + (phys_pc - RAM_BASE).
-        // So base = ram_ptr - RAM_BASE + (phys_pc - vpc).
         let base = (base as usize)
             .wrapping_add(phys_pc as usize)
             .wrapping_sub(pc as usize) as *const u8;
@@ -255,57 +309,50 @@ impl GuestCpu for FullSystemCpu {
         // (page_remain % 4 == 2), the last 2 bytes might
         // be the first half of a 32-bit instruction.
         let cross_page = if page_remain % 4 == 2 {
-            // Last 2 bytes of the page might be the
-            // first half of a 32-bit instruction.
+            let boundary_pa = phys_pc + page_remain - 2;
             let boundary_off =
-                (phys_pc + page_remain - 2).wrapping_sub(RAM_BASE);
-            if boundary_off < self.ram_size {
+                boundary_pa.wrapping_sub(region_base);
+            if boundary_off < region_size {
                 let lo = unsafe {
-                    let p = self.ram_ptr.add(boundary_off as usize);
+                    let p =
+                        region_ptr.add(boundary_off as usize);
                     (p as *const u16).read_unaligned()
                 };
-                // Check if this is a 32-bit instruction
-                // (bits [1:0] == 0b11 and bits [4:2]
-                // != 0b111).
-                let is_32bit = (lo & 0x3) == 0x3 && ((lo >> 2) & 0x7) != 0x7;
+                let is_32bit = (lo & 0x3) == 0x3
+                    && ((lo >> 2) & 0x7) != 0x7;
                 if is_32bit {
-                    // Translate page B via MMU for the
-                    // second half of the cross-page
-                    // instruction. Save/restore fault
-                    // state to avoid contaminating the
-                    // main gen_code path.
                     let next_vpc = pc + page_remain;
                     let sfc = self.cpu.mem_fault_cause;
                     let sft = self.cpu.mem_fault_tval;
                     let sfp = self.cpu.fault_pc;
-                    let next_phys = self.translate_pc(next_vpc);
+                    let next_phys =
+                        self.translate_pc(next_vpc);
                     if next_phys == u64::MAX {
-                        // Page B fault: latch the
-                        // instruction fault and
-                        // truncate TB.
-                        // Keep the fault state from
-                        // translate_pc (it latched the
-                        // correct cause/tval).
                         0u32
                     } else {
-                        // Restore fault state since
-                        // page B translation succeeded.
                         self.cpu.mem_fault_cause = sfc;
                         self.cpu.mem_fault_tval = sft;
                         self.cpu.fault_pc = sfp;
-                        let next_off = next_phys.wrapping_sub(RAM_BASE);
-                        if next_off >= self.ram_size {
-                            // Page B outside RAM: latch
-                            // InstructionAccessFault.
+                        let (np, nb, ns) =
+                            self.resolve_fetch_region(
+                                next_phys,
+                            );
+                        let noff = next_phys
+                            .wrapping_sub(nb);
+                        if np.is_null() || noff >= ns {
                             self.cpu.mem_fault_cause = 1;
-                            self.cpu.mem_fault_tval = pc + page_remain;
+                            self.cpu.mem_fault_tval =
+                                pc + page_remain;
                             0u32
                         } else {
                             let hi = unsafe {
-                                let p = self.ram_ptr.add(next_off as usize);
-                                (p as *const u16).read_unaligned()
+                                let p = np
+                                    .add(noff as usize);
+                                (p as *const u16)
+                                    .read_unaligned()
                             };
-                            (lo as u32) | ((hi as u32) << 16)
+                            (lo as u32)
+                                | ((hi as u32) << 16)
                         }
                     }
                 } else {
@@ -396,32 +443,8 @@ impl GuestCpu for FullSystemCpu {
 
     fn pending_interrupt(&self) -> bool {
         let dev_mip = self.shared_mip.load(Ordering::Relaxed);
-        let pending = (self.cpu.csr.mip | dev_mip) & self.cpu.csr.mie;
-        if pending == 0 {
-            return false;
-        }
-
-        let cur_priv = self.cpu.priv_level as u64;
-        for irq in [11u64, 3, 7, 9, 1, 5] {
-            let bit = 1u64 << irq;
-            if pending & bit == 0 {
-                continue;
-            }
-
-            let delegated = (self.cpu.csr.mideleg >> irq) & 1 != 0;
-            if delegated {
-                let s = PrivLevel::Supervisor as u64;
-                return cur_priv < s
-                    || (cur_priv == s
-                        && self.cpu.csr.mstatus & MSTATUS_SIE != 0);
-            }
-
-            let m = PrivLevel::Machine as u64;
-            return cur_priv < m
-                || (cur_priv == m && self.cpu.csr.mstatus & MSTATUS_MIE != 0);
-        }
-
-        false
+        let effective = self.cpu.csr.mip | dev_mip;
+        effective & self.cpu.csr.mie != 0
     }
 
     fn is_halted(&self) -> bool {
@@ -531,25 +554,22 @@ impl GuestCpu for FullSystemCpu {
     }
 
     fn handle_priv_csr(&mut self) -> bool {
-        // Translate virtual PC to physical for fetch.
         let pc = self.cpu.pc;
         self.cpu.fault_pc = 0;
         let phys_pc = self.translate_pc(pc);
         if phys_pc == u64::MAX {
-            // Fetch fault latched in mem_fault_cause.
-            // Return true so the exec loop does NOT
-            // raise IllegalInstruction; check_mem_fault
-            // will deliver the real instruction fault.
             return self.cpu.mem_fault_cause != 0;
         }
-        let pc_off = phys_pc.wrapping_sub(RAM_BASE);
-        if pc_off >= self.ram_size {
+        let (rp, rb, rs) =
+            self.resolve_fetch_region(phys_pc);
+        let off = phys_pc.wrapping_sub(rb);
+        if rp.is_null() || off >= rs {
             self.cpu.mem_fault_cause = 1;
             self.cpu.mem_fault_tval = pc;
             return true;
         }
         let insn = unsafe {
-            let ptr = self.ram_ptr.add(pc_off as usize);
+            let ptr = rp.add(off as usize);
             std::ptr::read_unaligned(ptr as *const u32)
         };
         // Decode CSR instruction fields:
@@ -579,20 +599,9 @@ impl GuestCpu for FullSystemCpu {
             }
         };
 
-        let old = match csr_addr {
-            machina_guest_riscv::riscv::csr::CSR_TIME => {
-                self.read_aclint_mtime()
-            }
-            machina_guest_riscv::riscv::csr::CSR_CYCLE => {
-                self.read_aclint_mtime()
-            }
-            machina_guest_riscv::riscv::csr::CSR_INSTRET => {
-                self.cpu.csr.instret
-            }
-            _ => match self.cpu.csr.read(csr_addr, priv_level) {
-                Ok(v) => v,
-                Err(_) => return false,
-            },
+        let old = match self.cpu.csr.read(csr_addr, priv_level) {
+            Ok(v) => v,
+            Err(_) => return false,
         };
 
         // Compute new value based on funct3.
@@ -643,17 +652,6 @@ impl GuestCpu for FullSystemCpu {
 
         self.cpu.pc += 4;
         true
-    }
-}
-
-impl FullSystemCpu {
-    fn read_aclint_mtime(&self) -> u64 {
-        const ACLINT_MTIME: u64 = 0x0200_BFF8;
-        let as_ptr = self.cpu.as_ptr as *const AddressSpace;
-        if as_ptr.is_null() {
-            return 0;
-        }
-        unsafe { (&*as_ptr).read(GPA::new(ACLINT_MTIME), 8) }
     }
 }
 
@@ -831,18 +829,6 @@ unsafe fn write_phys(cpu: *mut RiscvCpu, pa: u64, val: u64) {
     write_phys_sized(cpu, pa, val, 8);
 }
 
-fn is_phys_backed(cpu: &RiscvCpu, pa: u64, size: u32) -> bool {
-    if pa >= RAM_BASE && pa.checked_add(size as u64).is_some_and(|end| end <= cpu.ram_end) {
-        return true;
-    }
-    let asp = cpu.as_ptr;
-    if asp == 0 {
-        return false;
-    }
-    let as_ = unsafe { &*(asp as *const AddressSpace) };
-    as_.is_mapped(GPA::new(pa), size)
-}
-
 /// JIT slow path: guest load (TLB miss or MMIO).
 ///
 /// Receives a guest virtual address, translates through
@@ -858,14 +844,7 @@ pub unsafe extern "C" fn machina_mem_read(
 ) -> u64 {
     let cpu = &mut *(env as *mut RiscvCpu);
     match translate_for_helper(cpu, gva, AccessType::Read, size) {
-        Some(pa) => {
-            if !is_phys_backed(cpu, pa, size) {
-                cpu.mem_fault_cause = 5;
-                cpu.mem_fault_tval = gva;
-                return 0;
-            }
-            read_phys_sized(cpu, pa, size)
-        }
+        Some(pa) => read_phys_sized(cpu, pa, size),
         None => 0,
     }
 }
@@ -883,11 +862,6 @@ pub unsafe extern "C" fn machina_mem_write(
 ) {
     let cpu = &mut *(env as *mut RiscvCpu);
     if let Some(pa) = translate_for_helper(cpu, gva, AccessType::Write, size) {
-        if !is_phys_backed(cpu, pa, size) {
-            cpu.mem_fault_cause = 7;
-            cpu.mem_fault_tval = gva;
-            return;
-        }
         write_phys_sized(cpu, pa, val, size);
     }
 }

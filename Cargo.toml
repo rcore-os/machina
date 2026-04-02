@@ -50,7 +50,7 @@ serde_json  = "1"
 tempfile    = "3"
 
 [package]
-name = "machina"
+name = "machina-emu"
 version = "0.1.0"
 edition = "2021"
 description = "CLI entry point for the Machina RISC-V full-system emulator"

@@ -652,6 +652,21 @@ impl GuestCpu for FullSystemCpu {
 
     fn check_monitor_pause(&self) -> bool {
         if let Some(ref ms) = self.monitor_state {
+            // Save CPU snapshot before parking.
+            if ms.is_pause_requested() {
+                ms.store_snapshot(
+                    machina_core::monitor::CpuSnapshot {
+                        gpr: self.cpu.gpr,
+                        pc: self.cpu.pc,
+                        priv_level:
+                            self.cpu.priv_level as u8,
+                        halted: self
+                            .cpu
+                            .halted
+                            .load(Ordering::Relaxed),
+                    },
+                );
+            }
             return ms.check_pause();
         }
         false

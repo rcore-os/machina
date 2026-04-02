@@ -14,14 +14,24 @@ pub enum VmState {
     Paused,
 }
 
+/// CPU snapshot stored when paused.
+#[derive(Clone, Default)]
+pub struct CpuSnapshot {
+    pub gpr: [u64; 32],
+    pub pc: u64,
+    pub priv_level: u8,
+    pub halted: bool,
+}
+
 /// Shared state between exec loop and monitor.
 pub struct MonitorState {
     inner: Mutex<VmState>,
     pause_barrier: Condvar,
     resume_cv: Condvar,
     quit_requested: AtomicBool,
-    /// WFI waker to unblock halted CPU on pause.
     wfi_waker: Mutex<Option<Arc<crate::wfi::WfiWaker>>>,
+    /// CPU snapshot taken when paused.
+    snapshot: Mutex<Option<CpuSnapshot>>,
 }
 
 impl MonitorState {
@@ -32,7 +42,19 @@ impl MonitorState {
             resume_cv: Condvar::new(),
             quit_requested: AtomicBool::new(false),
             wfi_waker: Mutex::new(None),
+            snapshot: Mutex::new(None),
         }
+    }
+
+    /// Store a CPU snapshot (called by exec loop when
+    /// parking at pause barrier).
+    pub fn store_snapshot(&self, snap: CpuSnapshot) {
+        *self.snapshot.lock().unwrap() = Some(snap);
+    }
+
+    /// Read the stored CPU snapshot.
+    pub fn read_snapshot(&self) -> Option<CpuSnapshot> {
+        self.snapshot.lock().unwrap().clone()
     }
 
     /// Set the WFI waker for CPU wake-on-pause.

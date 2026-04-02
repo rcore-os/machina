@@ -158,7 +158,7 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "-h" | "--help" => {
                 usage();
-                process::exit(0);
+                machina_hw_core::chardev::restore_terminal(); process::exit(0);
             }
             other => {
                 return Err(format!("Unknown option: {}", other));
@@ -206,6 +206,7 @@ extern "C" fn crash_handler(
         rbp as u64,
         pc,
     );
+    machina_hw_core::chardev::restore_terminal();
     std::process::exit(139);
 }
 
@@ -221,14 +222,23 @@ fn run_machine_cycle(
 ) -> Option<ShutdownReason> {
     let mut machine = RefMachine::new();
 
+    // Set Ctrl+A X quit callback (restores terminal).
+    if let Some(ref ms) = monitor_state {
+        let ms_quit = Arc::clone(ms);
+        machine.set_quit_cb(Arc::new(move || {
+            ms_quit.request_quit();
+        }));
+    }
+
     if let Err(e) = machine.init(opts) {
+        machina_hw_core::chardev::restore_terminal();
         eprintln!("machina: init failed: {}", e);
-        process::exit(1);
+        machina_hw_core::chardev::restore_terminal(); process::exit(1);
     }
 
     if let Err(e) = machine.boot() {
         eprintln!("machina: boot failed: {}", e);
-        process::exit(1);
+        machina_hw_core::chardev::restore_terminal(); process::exit(1);
     }
 
     // JIT backend with SoftMMU/TLB config.
@@ -320,18 +330,18 @@ fn main() {
         Err(e) => {
             eprintln!("machina: {}", e);
             usage();
-            process::exit(1);
+            machina_hw_core::chardev::restore_terminal(); process::exit(1);
         }
     };
 
     if cli.machine == "?" {
         eprintln!("Available machines:");
         eprintln!("  riscv64-ref    RISC-V reference machine");
-        process::exit(0);
+        machina_hw_core::chardev::restore_terminal(); process::exit(0);
     }
     if cli.machine != "riscv64-ref" {
         eprintln!("machina: unknown machine: {}", cli.machine);
-        process::exit(1);
+        machina_hw_core::chardev::restore_terminal(); process::exit(1);
     }
 
     let ram_size = cli.ram_mib * 1024 * 1024;
@@ -354,7 +364,7 @@ fn main() {
             "machina: -monitor stdio and -nographic \
              are mutually exclusive"
         );
-        process::exit(1);
+        machina_hw_core::chardev::restore_terminal(); process::exit(1);
     }
 
     eprintln!("machina: riscv64-ref, {} MiB RAM", cli.ram_mib,);
@@ -364,18 +374,19 @@ fn main() {
         return;
     }
 
-    // Create shared monitor state.
+    // Create shared monitor state and service.
     let monitor_state = Arc::new(
         machina_core::monitor::MonitorState::new(),
     );
+    let monitor_svc = Arc::new(std::sync::Mutex::new(
+        machina_monitor::service::MonitorService::new(
+            Arc::clone(&monitor_state),
+        ),
+    ));
 
     // Start monitor transport thread (if configured).
     if let Some(ref mon) = cli.monitor {
-        let svc = Arc::new(std::sync::Mutex::new(
-            machina_monitor::service::MonitorService::new(
-                Arc::clone(&monitor_state),
-            ),
-        ));
+        let svc = Arc::clone(&monitor_svc);
         if let Some(addr) = mon.strip_prefix("tcp:") {
             let listener =
                 std::net::TcpListener::bind(addr)
@@ -384,7 +395,7 @@ fn main() {
                             "machina: monitor tcp: {}",
                             e
                         );
-                        process::exit(1);
+                        machina_hw_core::chardev::restore_terminal(); process::exit(1);
                     });
             let svc2 = Arc::clone(&svc);
             std::thread::spawn(move || {
@@ -426,7 +437,7 @@ fn main() {
                 machina_hw_core::chardev
                     ::restore_terminal();
                 eprintln!("machina: shutdown (pass)");
-                process::exit(0);
+                machina_hw_core::chardev::restore_terminal(); process::exit(0);
             }
             Some(ShutdownReason::Reset) => {
                 eprintln!("machina: reset, rebooting...");
@@ -438,13 +449,13 @@ fn main() {
                     "machina: fail (code {:#x})",
                     code
                 );
-                process::exit(1);
+                machina_hw_core::chardev::restore_terminal(); process::exit(1);
             }
             None => {
                 machina_hw_core::chardev
                     ::restore_terminal();
                 eprintln!("machina: execution exited");
-                process::exit(0);
+                machina_hw_core::chardev::restore_terminal(); process::exit(0);
             }
         }
     }

@@ -187,6 +187,12 @@ pub struct RefMachine {
     uart_irq: Option<IrqLine>,
     // Whether VirtIO block device is configured.
     has_virtio: bool,
+    // Monitor callbacks for StdioChardev.
+    quit_cb:
+        Option<Arc<dyn Fn() + Send + Sync>>,
+    monitor_cb: Option<
+        Arc<Mutex<dyn FnMut(u8) + Send>>,
+    >,
 }
 
 impl RefMachine {
@@ -210,6 +216,8 @@ impl RefMachine {
             kernel_path: None,
             uart_irq: None,
             has_virtio: false,
+            quit_cb: None,
+            monitor_cb: None,
         }
     }
 
@@ -233,6 +241,22 @@ impl RefMachine {
 
     pub fn sifive_test(&self) -> &Arc<SifiveTest> {
         self.sifive_test.as_ref().expect("machine not initialized")
+    }
+
+    /// Set quit callback for StdioChardev (Ctrl+A X).
+    pub fn set_quit_cb(
+        &mut self,
+        cb: Arc<dyn Fn() + Send + Sync>,
+    ) {
+        self.quit_cb = Some(cb);
+    }
+
+    /// Set monitor callback for StdioChardev (Ctrl+A C).
+    pub fn set_monitor_cb(
+        &mut self,
+        cb: Arc<Mutex<dyn FnMut(u8) + Send>>,
+    ) {
+        self.monitor_cb = Some(cb);
     }
 
     pub fn ram_block(&self) -> &Arc<RamBlock> {
@@ -629,11 +653,28 @@ impl Machine for RefMachine {
 
         // ---- Attach IRQ + chardev to UART ----
         {
-            let backend: Box<dyn Chardev + Send> = if opts.nographic {
-                Box::new(StdioChardev::new())
-            } else {
-                Box::new(NullChardev)
-            };
+            let backend: Box<dyn Chardev + Send> =
+                if opts.nographic {
+                    let mut sc = StdioChardev::new();
+                    // Install monitor callbacks if
+                    // monitor_cb/quit_cb were set
+                    // on self by the caller.
+                    if let Some(ref qcb) =
+                        self.quit_cb
+                    {
+                        sc.set_quit_cb(Arc::clone(qcb));
+                    }
+                    if let Some(ref mcb) =
+                        self.monitor_cb
+                    {
+                        sc.set_monitor_cb(
+                            Arc::clone(mcb),
+                        );
+                    }
+                    Box::new(sc)
+                } else {
+                    Box::new(NullChardev)
+                };
             let mut fe = CharFrontend::new(backend);
 
             // Wire backend input -> UART receive.

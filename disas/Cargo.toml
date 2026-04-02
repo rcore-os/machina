@@ -2,3 +2,9 @@
 name = "machina-disas"
 version = "0.1.0"
 edition = "2021"
+description = "RISC-V instruction disassembler"
+license = "MIT"
+repository = "https://github.com/gevico/machina"
+authors = ["Chao Liu <chao.liu.zevorn@gmail.com>"]
+keywords = ["riscv", "disassembler"]
+categories = ["emulators"]

@@ -2,3 +2,9 @@
 name = "machina-decode"
 version = "0.1.0"
 edition = "2021"
+description = "Decoder generator that parses .decode files and produces Rust instruction decoders"
+license = "MIT"
+repository = "https://github.com/gevico/machina"
+authors = ["Chao Liu <chao.liu.zevorn@gmail.com>"]
+keywords = ["riscv", "decoder", "code-generation"]
+categories = ["emulators", "development-tools"]

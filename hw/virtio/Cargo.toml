@@ -2,8 +2,14 @@
 name = "machina-hw-virtio"
 version = "0.1.0"
 edition = "2021"
+description = "VirtIO MMIO transport and block device model"
+license = "MIT"
+repository = "https://github.com/gevico/machina"
+authors = ["Chao Liu <chao.liu.zevorn@gmail.com>"]
+keywords = ["riscv", "emulator", "virtio", "block-device"]
+categories = ["emulators", "hardware-support"]
 
 [dependencies]
-machina-hw-core = { path = "../core" }
-machina-memory = { path = "../../memory" }
-libc = "0.2"
+machina-hw-core = { workspace = true }
+machina-memory = { workspace = true }
+libc = { workspace = true }

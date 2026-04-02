@@ -2,7 +2,13 @@
 name = "machina-memory"
 version = "0.1.0"
 edition = "2021"
+description = "Address space management, MMIO dispatch, and RAM block handling"
+license = "MIT"
+repository = "https://github.com/gevico/machina"
+authors = ["Chao Liu <chao.liu.zevorn@gmail.com>"]
+keywords = ["riscv", "emulator", "memory", "mmio"]
+categories = ["emulators"]
 
 [dependencies]
-machina-core = { path = "../core" }
-libc = "0.2"
+machina-core = { workspace = true }
+libc = { workspace = true }

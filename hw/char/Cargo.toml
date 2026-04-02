@@ -2,7 +2,13 @@
 name = "machina-hw-char"
 version = "0.1.0"
 edition = "2021"
+description = "UART 16550A serial device model"
+license = "MIT"
+repository = "https://github.com/gevico/machina"
+authors = ["Chao Liu <chao.liu.zevorn@gmail.com>"]
+keywords = ["riscv", "emulator", "uart", "serial"]
+categories = ["emulators", "hardware-support"]
 
 [dependencies]
-machina-core = { path = "../../core" }
-machina-hw-core = { path = "../core" }
+machina-core = { workspace = true }
+machina-hw-core = { workspace = true }

@@ -2,3 +2,9 @@
 name = "machina-core"
 version = "0.1.0"
 edition = "2021"
+description = "Core IR definitions, CPU traits, and address types for the Machina RISC-V emulator"
+license = "MIT"
+repository = "https://github.com/gevico/machina"
+authors = ["Chao Liu <chao.liu.zevorn@gmail.com>"]
+keywords = ["riscv", "emulator", "jit", "ir"]
+categories = ["emulators"]

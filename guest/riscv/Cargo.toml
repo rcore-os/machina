@@ -2,10 +2,16 @@
 name = "machina-guest-riscv"
 version = "0.1.0"
 edition = "2021"
+description = "RISC-V guest frontend: RV64GC instruction translation, privileged ISA, and Sv39 MMU"
+license = "MIT"
+repository = "https://github.com/gevico/machina"
+authors = ["Chao Liu <chao.liu.zevorn@gmail.com>"]
+keywords = ["riscv", "emulator", "frontend", "translation"]
+categories = ["emulators"]
 
 [dependencies]
-machina-accel = { path = "../../accel" }
-libc = "0.2"
+machina-accel = { workspace = true }
+libc = { workspace = true }
 
 [build-dependencies]
-machina-decode = { path = "../../decode" }
+machina-decode = { workspace = true }

@@ -2,7 +2,13 @@
 name = "machina-hw-intc"
 version = "0.1.0"
 edition = "2021"
+description = "RISC-V interrupt controllers: PLIC and ACLINT (MTIMER + MSWI)"
+license = "MIT"
+repository = "https://github.com/gevico/machina"
+authors = ["Chao Liu <chao.liu.zevorn@gmail.com>"]
+keywords = ["riscv", "emulator", "interrupt", "plic"]
+categories = ["emulators", "hardware-support"]
 
 [dependencies]
-machina-core = { path = "../../core" }
-machina-hw-core = { path = "../core" }
+machina-core = { workspace = true }
+machina-hw-core = { workspace = true }

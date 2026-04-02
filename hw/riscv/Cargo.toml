@@ -2,15 +2,21 @@
 name = "machina-hw-riscv"
 version = "0.1.0"
 edition = "2021"
+description = "RISC-V reference machine with boot flow, SBI firmware interface, and device integration"
+license = "MIT"
+repository = "https://github.com/gevico/machina"
+authors = ["Chao Liu <chao.liu.zevorn@gmail.com>"]
+keywords = ["riscv", "emulator", "machine", "sbi"]
+categories = ["emulators", "hardware-support"]
 
 [features]
 embed-firmware = []
 
 [dependencies]
-machina-core = { path = "../../core" }
-machina-hw-core = { path = "../core" }
-machina-hw-intc = { path = "../intc" }
-machina-hw-char = { path = "../char" }
-machina-memory = { path = "../../memory" }
-machina-guest-riscv = { path = "../../guest/riscv" }
-machina-hw-virtio = { path = "../virtio" }
+machina-core = { workspace = true }
+machina-hw-core = { workspace = true }
+machina-hw-intc = { workspace = true }
+machina-hw-char = { workspace = true }
+machina-memory = { workspace = true }
+machina-guest-riscv = { workspace = true }
+machina-hw-virtio = { workspace = true }

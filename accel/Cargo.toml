@@ -2,8 +2,14 @@
 name = "machina-accel"
 version = "0.1.0"
 edition = "2021"
+description = "JIT acceleration engine: IR optimization, register allocation, x86-64 code generation, and TB execution"
+license = "MIT"
+repository = "https://github.com/gevico/machina"
+authors = ["Chao Liu <chao.liu.zevorn@gmail.com>"]
+keywords = ["riscv", "jit", "emulator", "codegen", "x86-64"]
+categories = ["emulators"]
 
 [dependencies]
-machina-core = { path = "../core" }
-machina-memory = { path = "../memory" }
-libc = "0.2"
+machina-core = { workspace = true }
+machina-memory = { workspace = true }
+libc = { workspace = true }

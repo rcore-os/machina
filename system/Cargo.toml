@@ -2,9 +2,15 @@
 name = "machina-system"
 version = "0.1.0"
 edition = "2021"
+description = "Full-system CPU bridge, CPU manager, and WFI handling"
+license = "MIT"
+repository = "https://github.com/gevico/machina"
+authors = ["Chao Liu <chao.liu.zevorn@gmail.com>"]
+keywords = ["riscv", "emulator", "system", "cpu"]
+categories = ["emulators"]
 
 [dependencies]
-machina-core = { path = "../core" }
-machina-accel = { path = "../accel" }
-machina-guest-riscv = { path = "../guest/riscv" }
-machina-memory = { path = "../memory" }
+machina-core = { workspace = true }
+machina-accel = { workspace = true }
+machina-guest-riscv = { workspace = true }
+machina-memory = { workspace = true }

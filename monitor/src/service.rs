@@ -33,14 +33,25 @@ impl MonitorService {
     }
 
     pub fn query_cpus(&self) -> Vec<CpuInfo> {
+        let running = self.query_status();
         let snap = self.state.read_snapshot();
         vec![CpuInfo {
             cpu_index: 0,
-            pc: snap.as_ref().map(|s| s.pc).unwrap_or(0),
-            halted: snap
-                .as_ref()
-                .map(|s| s.halted)
-                .unwrap_or(false),
+            // PC is only accurate when paused.
+            pc: if running {
+                0
+            } else {
+                snap.as_ref()
+                    .map(|s| s.pc)
+                    .unwrap_or(0)
+            },
+            halted: if running {
+                false
+            } else {
+                snap.as_ref()
+                    .map(|s| s.halted)
+                    .unwrap_or(false)
+            },
             arch: "riscv64".to_string(),
         }]
     }

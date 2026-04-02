@@ -352,6 +352,7 @@ fn run_machine_cycle(
     }
     if let Some(ref ms) = monitor_state {
         ms.set_wfi_waker(wfi_waker.clone());
+        ms.set_stop_flag(Arc::clone(&stop_flag));
         fs_cpu.set_monitor_state(Arc::clone(ms));
     }
     cpu_mgr.add_cpu(fs_cpu);

@@ -30,8 +30,11 @@ pub struct MonitorState {
     resume_cv: Condvar,
     quit_requested: AtomicBool,
     wfi_waker: Mutex<Option<Arc<crate::wfi::WfiWaker>>>,
-    /// CPU snapshot taken when paused.
     snapshot: Mutex<Option<CpuSnapshot>>,
+    /// CpuManager running flag — cleared on quit.
+    stop_flag: Mutex<
+        Option<Arc<AtomicBool>>,
+    >,
 }
 
 impl MonitorState {
@@ -43,7 +46,16 @@ impl MonitorState {
             quit_requested: AtomicBool::new(false),
             wfi_waker: Mutex::new(None),
             snapshot: Mutex::new(None),
+            stop_flag: Mutex::new(None),
         }
+    }
+
+    /// Set the CpuManager stop flag for quit.
+    pub fn set_stop_flag(
+        &self,
+        flag: Arc<AtomicBool>,
+    ) {
+        *self.stop_flag.lock().unwrap() = Some(flag);
     }
 
     /// Store a CPU snapshot (called by exec loop when
@@ -101,6 +113,13 @@ impl MonitorState {
     /// Request clean process exit.
     pub fn request_quit(&self) {
         self.quit_requested.store(true, Ordering::SeqCst);
+        // Clear CpuManager running flag so the outer
+        // run() loop exits after cpu_exec_loop returns.
+        if let Some(ref flag) =
+            *self.stop_flag.lock().unwrap()
+        {
+            flag.store(false, Ordering::SeqCst);
+        }
         // Resume if paused, so exec loop can exit.
         let mut state = self.inner.lock().unwrap();
         *state = VmState::Running;

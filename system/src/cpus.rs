@@ -18,12 +18,38 @@ use machina_guest_riscv::riscv::csr::PrivLevel;
 use machina_guest_riscv::riscv::exception::Exception;
 use machina_guest_riscv::riscv::ext::RiscvCfg;
 use machina_guest_riscv::riscv::{RiscvDisasContext, RiscvTranslator};
-use machina_guest_riscv::{translator_loop, DisasJumpType, TranslatorOps};
+use machina_guest_riscv::{DisasJumpType, TranslatorOps};
 
 const NUM_GPRS: usize = 32;
 pub const RAM_BASE: u64 = 0x8000_0000;
 const MSTATUS_SIE: u64 = 1 << 1;
 const MSTATUS_MIE: u64 = 1 << 3;
+const MSTATUS_MPRV: u64 = 1 << 17;
+const MSTATUS_MPP_MASK: u64 = 0x3 << 11;
+const MSTATUS_MPP_SHIFT: u32 = 11;
+
+fn effective_data_priv(
+    priv_level: PrivLevel,
+    mstatus: u64,
+) -> PrivLevel {
+    if priv_level == PrivLevel::Machine
+        && (mstatus & MSTATUS_MPRV) != 0
+    {
+        return match (mstatus & MSTATUS_MPP_MASK) >> MSTATUS_MPP_SHIFT {
+            0 => PrivLevel::User,
+            1 => PrivLevel::Supervisor,
+            _ => PrivLevel::Machine,
+        };
+    }
+    priv_level
+}
+
+fn should_flush_data_tlb_on_status_write(csr_addr: u16) -> bool {
+    use machina_guest_riscv::riscv::csr::{
+        CSR_MSTATUS, CSR_SSTATUS,
+    };
+    matches!(csr_addr, CSR_MSTATUS | CSR_SSTATUS)
+}
 
 /// Compute the byte offset of the TLB Box pointer from
 /// the start of RiscvCpu (env pointer). Used by the JIT
@@ -93,6 +119,9 @@ pub struct FullSystemCpu {
     monitor_state: Option<
         Arc<machina_core::monitor::MonitorState>,
     >,
+    // HTIF tohost: offset within RAM to poll for exit.
+    htif_tohost_off: Option<u64>,
+    htif_exit_code: Arc<AtomicU64>,
 }
 
 // SAFETY: ram_ptr points to mmap'd memory owned by
@@ -131,7 +160,35 @@ impl FullSystemCpu {
             wfi_waker,
             stop_flag,
             monitor_state: None,
+            htif_tohost_off: None,
+            htif_exit_code: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Configure HTIF tohost polling address (GPA).
+    /// The address must be within RAM.
+    pub fn set_htif_tohost(&mut self, gpa: u64) {
+        let off = gpa.wrapping_sub(RAM_BASE);
+        if off < self.ram_size {
+            self.htif_tohost_off = Some(off);
+        }
+    }
+
+    /// Return a clone of the HTIF exit code atomic.
+    /// Value 0 = not exited.  1 = pass.
+    /// Other (test_num << 1 | 1) = fail.
+    pub fn htif_exit_code(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.htif_exit_code)
+    }
+
+    /// Set code-page bitmap pointer for store helper.
+    pub fn set_code_pages(
+        &mut self,
+        ptr: *const std::sync::atomic::AtomicU8,
+        len: usize,
+    ) {
+        self.cpu.code_pages_ptr = ptr as u64;
+        self.cpu.code_pages_len = len as u64;
     }
 
     /// Attach monitor state for pause/resume control.
@@ -491,18 +548,25 @@ impl GuestCpu for FullSystemCpu {
             d.base.max_insns = limit;
             d.cross_page_insn = cross_page;
             d.cross_page_pc = xpage_pc;
-            translator_loop::<RiscvTranslator>(&mut d, ir);
-            d.base.num_insns * 4
-        } else {
-            let mut d = RiscvDisasContext::new(pc, base, cfg);
-            d.base.max_insns = limit;
-            d.cross_page_insn = cross_page;
-            d.cross_page_pc = xpage_pc;
-            d.env = TempIdx(0);
+            d.env = ir.new_fixed(
+                machina_accel::ir::types::Type::I64,
+                5,
+                "env",
+            );
             for i in 0..NUM_GPRS {
-                d.gpr[i] = TempIdx(1 + i as u32);
+                d.gpr[i] = ir.new_global(
+                    machina_accel::ir::types::Type::I64,
+                    d.env,
+                    machina_guest_riscv::riscv::cpu::gpr_offset(i),
+                    "gpr",
+                );
             }
-            d.pc = TempIdx(1 + NUM_GPRS as u32);
+            d.pc = ir.new_global(
+                machina_accel::ir::types::Type::I64,
+                d.env,
+                machina_guest_riscv::riscv::cpu::PC_OFFSET,
+                "pc",
+            );
             d.load_res = ir.new_global(
                 machina_accel::ir::types::Type::I64,
                 d.env,
@@ -521,8 +585,33 @@ impl GuestCpu for FullSystemCpu {
                 fault_pc_offset() as i64,
                 "fault_pc",
             );
-            // d.csr_helper =
-                machina_csr_op as *const () as u64;
+            RiscvTranslator::tb_start(&mut d, ir);
+            loop {
+                RiscvTranslator::insn_start(&mut d, ir);
+                RiscvTranslator::translate_insn(&mut d, ir);
+                if d.base.is_jmp != DisasJumpType::Next {
+                    break;
+                }
+                if d.base.num_insns >= d.base.max_insns {
+                    d.base.is_jmp = DisasJumpType::TooMany;
+                    break;
+                }
+            }
+            RiscvTranslator::tb_stop(&mut d, ir);
+            d.base.num_insns * 4
+        } else {
+            let mut d = RiscvDisasContext::new(pc, base, cfg);
+            d.base.max_insns = limit;
+            d.cross_page_insn = cross_page;
+            d.cross_page_pc = xpage_pc;
+            d.env = TempIdx(0);
+            for i in 0..NUM_GPRS {
+                d.gpr[i] = TempIdx(1 + i as u32);
+            }
+            d.pc = TempIdx(1 + NUM_GPRS as u32);
+            d.load_res = TempIdx(1 + NUM_GPRS as u32 + 1);
+            d.load_val = TempIdx(1 + NUM_GPRS as u32 + 2);
+            d.fault_pc = TempIdx(1 + NUM_GPRS as u32 + 3);
             RiscvTranslator::tb_start(&mut d, ir);
             loop {
                 RiscvTranslator::insn_start(&mut d, ir);
@@ -581,6 +670,14 @@ impl GuestCpu for FullSystemCpu {
         false
     }
 
+    fn pending_wfi_wakeup(&self) -> bool {
+        let dev_mip =
+            self.shared_mip.load(Ordering::Relaxed);
+        ((self.cpu.csr.mip | dev_mip)
+            & self.cpu.csr.mie)
+            != 0
+    }
+
     fn is_halted(&self) -> bool {
         self.cpu.halted.load(Ordering::Relaxed)
     }
@@ -601,7 +698,7 @@ impl GuestCpu for FullSystemCpu {
         self.cpu.csr.mip &= !dev_mip;
     }
 
-    fn handle_exception(&mut self, excp: u32, tval: u64) {
+    fn handle_exception(&mut self, excp: u64, tval: u64) {
         let e = match excp {
             0 => Exception::InstructionMisaligned,
             1 => Exception::InstructionAccessFault,
@@ -647,7 +744,26 @@ impl GuestCpu for FullSystemCpu {
     }
 
     fn should_exit(&self) -> bool {
-        !self.stop_flag.load(Ordering::Relaxed)
+        if !self.stop_flag.load(Ordering::Relaxed) {
+            return true;
+        }
+        // Poll HTIF tohost for riscv-tests exit.
+        if let Some(off) = self.htif_tohost_off {
+            let val = unsafe {
+                let p = self.ram_ptr.add(off as usize)
+                    as *const u64;
+                std::ptr::read_volatile(p)
+            };
+            if val != 0 {
+                self.htif_exit_code
+                    .store(val, Ordering::SeqCst);
+                self.stop_flag
+                    .store(false, Ordering::SeqCst);
+                self.wfi_waker.stop();
+                return true;
+            }
+        }
+        false
     }
 
     fn check_monitor_pause(&self) -> bool {
@@ -683,7 +799,7 @@ impl GuestCpu for FullSystemCpu {
                 self.cpu.pc = self.cpu.fault_pc;
                 self.cpu.fault_pc = 0;
             }
-            self.handle_exception(cause as u32, tval);
+            self.handle_exception(cause, tval);
             true
         } else {
             false
@@ -698,6 +814,28 @@ impl GuestCpu for FullSystemCpu {
 
     fn last_phys_pc(&self) -> u64 {
         self.cpu.last_phys_pc
+    }
+
+    fn translate_pc(&self, vpc: u64) -> u64 {
+        // In M-mode with satp=0 (bare addressing),
+        // virtual == physical.
+        use machina_guest_riscv::riscv::csr::PrivLevel;
+        if self.cpu.priv_level == PrivLevel::Machine {
+            return vpc;
+        }
+        let satp = self.cpu.csr.satp;
+        if (satp >> 60) == 0 {
+            return vpc; // Bare mode
+        }
+        // TLB lookup: return guest physical address.
+        if let Some(pa) =
+            self.cpu.mmu.tlb_lookup_code_phys(vpc)
+        {
+            return pa;
+        }
+        // TLB miss — return 0 (skip phys_pc check,
+        // let gen_code do the page walk).
+        0
     }
 
     fn take_dirty_pages(&mut self) -> Vec<u64> {
@@ -820,6 +958,8 @@ impl GuestCpu for FullSystemCpu {
                 // TLB flush ensures slow-path page walk
                 // on next access. TB correctness relies
                 // on phys_pc validation in tb_find.
+            } else if should_flush_data_tlb_on_status_write(csr_addr) {
+                self.cpu.mmu.flush();
             }
         }
 
@@ -854,8 +994,10 @@ unsafe fn translate_for_helper(
     access: AccessType,
     size: u32,
 ) -> Option<u64> {
+    let eff_priv =
+        effective_data_priv(cpu.priv_level, cpu.csr.mstatus);
     // M-mode always uses BARE regardless of satp.
-    let mode = if cpu.priv_level == PrivLevel::Machine {
+    let mode = if eff_priv == PrivLevel::Machine {
         0
     } else {
         cpu.mmu.satp_mode()
@@ -865,7 +1007,7 @@ unsafe fn translate_for_helper(
         // PMP check.
         match cpu
             .pmp
-            .check_access(gva, size as u64, access, cpu.priv_level)
+            .check_access(gva, size as u64, access, eff_priv)
         {
             Ok(()) => {}
             Err(e) => {
@@ -890,7 +1032,7 @@ unsafe fn translate_for_helper(
         Some(gva)
     } else {
         // Sv39: full MMU translation.
-        let priv_level = cpu.priv_level;
+        let priv_level = eff_priv;
         let mstatus = cpu.csr.mstatus;
         let ram_end = cpu.ram_end;
         let guest_base = cpu.guest_base;
@@ -984,11 +1126,32 @@ unsafe fn write_phys_sized(cpu: *mut RiscvCpu, pa: u64, val: u64, size: u32) {
             8 => (ptr as *mut u64).write_unaligned(val),
             _ => {}
         }
-        // Track dirty page for fence.i invalidation.
-        let page = pa >> 12;
-        let cpu_mut = &mut *cpu;
-        if !cpu_mut.dirty_pages.contains(&page) {
-            cpu_mut.dirty_pages.push(page);
+        // Track dirty page ONLY if writing to a code
+        // page (page that contains translated TBs).
+        // This matches QEMU's PAGE_WRITE_INV / notdirty
+        // mechanism: data-only pages are not tracked.
+        let cp = cpu_ref.code_pages_ptr;
+        if cp != 0 {
+            let page = pa >> 12;
+            let idx = (page as usize) / 8;
+            let bit = (page as usize) % 8;
+            let len = cpu_ref.code_pages_len as usize;
+            if idx < len {
+                use std::sync::atomic::AtomicU8;
+                let bp = cp as *const AtomicU8;
+                let v = (*bp.add(idx)).load(
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                if v & (1u8 << bit) != 0 {
+                    let cpu_mut = &mut *cpu;
+                    if !cpu_mut
+                        .dirty_pages
+                        .contains(&page)
+                    {
+                        cpu_mut.dirty_pages.push(page);
+                    }
+                }
+            }
         }
     } else {
         let asp = cpu_ref.as_ptr;
@@ -1109,6 +1272,10 @@ unsafe fn cpu_loop_exit(cpu: &RiscvCpu) -> ! {
 /// Called from JIT code via gen_call instead of exiting
 /// the TB. On illegal CSR access, delivers the exception
 /// via raise_exception + longjmp back to exec loop.
+///
+/// # Safety
+/// Caller must ensure `env` is a valid pointer to a
+/// `RiscvCpu` instance.
 #[no_mangle]
 pub unsafe extern "C" fn machina_csr_op(
     env: *mut u8,
@@ -1189,6 +1356,8 @@ pub unsafe extern "C" fn machina_csr_op(
             cpu.mmu.set_satp(new_val);
             cpu.mmu.flush();
             cpu.tb_flush_pending = true;
+        } else if should_flush_data_tlb_on_status_write(csr_addr) {
+            cpu.mmu.flush();
         }
     }
 

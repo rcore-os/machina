@@ -211,8 +211,8 @@ extern "C" fn crash_handler(
 }
 
 /// Run one machine cycle: init, boot, execute.
-/// Returns the ShutdownReason if SiFive Test triggered,
-/// or None if execution ended without shutdown device.
+/// Returns the ShutdownReason if SiFive Test or HTIF
+/// triggered, or None if execution ended without either.
 fn run_machine_cycle(
     opts: &MachineOpts,
     ram_size: u64,
@@ -224,6 +224,7 @@ fn run_machine_cycle(
             machina_monitor::service::MonitorService,
         >,
     >,
+    htif_tohost: Option<u64>,
 ) -> Option<ShutdownReason> {
     let mut machine = RefMachine::new();
 
@@ -251,34 +252,31 @@ fn run_machine_cycle(
                 if ch == '\r' || ch == '\n' {
                     let line = buf.clone();
                     buf.clear();
-                    match machina_monitor::hmp
-                        ::handle_line(&line, &mon_svc)
-                    {
-                        Some(output) => {
-                            let mut out =
-                                std::io::stderr()
-                                    .lock();
-                            let _ = write!(
-                                out, "\r{}",
-                                output
-                            );
-                            let _ = write!(
-                                out, "{}",
-                                machina_monitor::hmp
-                                    ::PROMPT
-                            );
-                            let _ = out.flush();
-                        }
-                        None => {} // quit handled
+                    // quit handled
+                    if let Some(output) = machina_monitor::hmp
+                        ::handle_line(&line, &mon_svc) {
+                        let mut out =
+                            std::io::stderr()
+                                .lock();
+                        let _ = write!(
+                            out, "\r{}",
+                            output
+                        );
+                        let _ = write!(
+                            out, "{}",
+                            machina_monitor::hmp
+                                ::PROMPT
+                        );
+                        let _ = out.flush();
                     }
                 } else if byte == 0x7f || byte == 0x08
                 {
                     // Backspace.
                     buf.pop();
-                    let _ = eprint!("\x08 \x08");
+                    eprint!("\x08 \x08");
                 } else {
                     buf.push(ch);
-                    let _ = eprint!("{}", ch);
+                    eprint!("{}", ch);
                 }
             },
         ));
@@ -350,6 +348,16 @@ fn run_machine_cycle(
             machine.mrom_block().as_ptr() as *const u8;
         fs_cpu.set_mrom(mrom_ptr, MROM_BASE, MROM_SIZE);
     }
+    // Configure HTIF tohost polling if provided.
+    if let Some(tohost_gpa) = htif_tohost {
+        fs_cpu.set_htif_tohost(tohost_gpa);
+    }
+    // Set code-page bitmap for store helper.
+    fs_cpu.set_code_pages(
+        shared.tb_store.code_pages_ptr(),
+        shared.tb_store.code_pages_len(),
+    );
+    let htif_exit = fs_cpu.htif_exit_code();
     if let Some(ref ms) = monitor_state {
         ms.set_wfi_waker(wfi_waker.clone());
         ms.set_stop_flag(Arc::clone(&stop_flag));
@@ -375,8 +383,23 @@ fn run_machine_cycle(
 
     let _exit = unsafe { cpu_mgr.run(&shared) };
 
+    // Check SiFive Test first.
     let result = shutdown_reason.lock().unwrap().take();
-    result
+    if result.is_some() {
+        return result;
+    }
+    // Check HTIF tohost exit code.
+    let code = htif_exit.load(Ordering::SeqCst);
+    if code != 0 {
+        if code == 1 {
+            return Some(ShutdownReason::Pass);
+        } else {
+            return Some(ShutdownReason::Fail(
+                code as u32,
+            ));
+        }
+    }
+    None
 }
 
 fn main() {
@@ -423,7 +446,21 @@ fn main() {
         machina_hw_core::chardev::restore_terminal(); process::exit(1);
     }
 
+    // Find HTIF tohost symbol from kernel ELF.
+    let htif_tohost: Option<u64> = cli.kernel.as_ref().and_then(|p| {
+        let data = std::fs::read(p).ok()?;
+        machina_hw_core::loader::elf_find_symbol(
+            &data, "tohost",
+        )
+    });
+
     eprintln!("machina: riscv64-ref, {} MiB RAM", cli.ram_mib,);
+    if let Some(addr) = htif_tohost {
+        eprintln!(
+            "machina: HTIF tohost at {:#x}",
+            addr
+        );
+    }
 
     if cli.difftest {
         difftest::run_difftest(&opts, cli.ram_mib);
@@ -494,6 +531,7 @@ fn main() {
             ram_size,
             ms,
             Arc::clone(&monitor_svc),
+            htif_tohost,
         );
 
         match reason {

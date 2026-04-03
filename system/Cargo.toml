@@ -1,11 +1,11 @@
 [package]
 name = "machina-system"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Full-system CPU bridge, CPU manager, and WFI handling"
-license = "MIT"
-repository = "https://github.com/gevico/machina"
-authors = ["Chao Liu <chao.liu.zevorn@gmail.com>"]
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 keywords = ["riscv", "emulator", "system", "cpu"]
 categories = ["emulators"]
 

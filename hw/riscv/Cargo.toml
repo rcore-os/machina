@@ -1,11 +1,11 @@
 [package]
 name = "machina-hw-riscv"
-version = "0.1.1"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "RISC-V reference machine with boot flow, SBI firmware interface, and device integration"
-license = "MIT"
-repository = "https://github.com/gevico/machina"
-authors = ["Chao Liu <chao.liu.zevorn@gmail.com>"]
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 keywords = ["riscv", "emulator", "machine", "sbi"]
 categories = ["emulators", "hardware-support"]
 

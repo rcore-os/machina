@@ -1,11 +1,11 @@
 [package]
 name = "machina-monitor"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Debug monitor interface with HMP and MMP protocol support"
-license = "MIT"
-repository = "https://github.com/gevico/machina"
-authors = ["Chao Liu <chao.liu.zevorn@gmail.com>"]
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 keywords = ["riscv", "emulator", "monitor", "debug"]
 categories = ["emulators", "development-tools::debugging"]
 

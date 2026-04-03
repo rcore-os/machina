@@ -1,11 +1,11 @@
 [package]
 name = "machina-accel"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "JIT acceleration engine: IR optimization, register allocation, x86-64 code generation, and TB execution"
-license = "MIT"
-repository = "https://github.com/gevico/machina"
-authors = ["Chao Liu <chao.liu.zevorn@gmail.com>"]
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 keywords = ["riscv", "jit", "emulator", "codegen", "x86-64"]
 categories = ["emulators"]
 

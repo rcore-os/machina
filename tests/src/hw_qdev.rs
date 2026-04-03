@@ -1,11 +1,8 @@
 use std::any::Any;
 
-use machina_core::address::GPA;
 use machina_core::mobject::{MObject, MObjectState};
-use machina_hw_core::bus::SysBus;
 use machina_hw_core::mdev::{MDevice, MDeviceLifecycle};
 use machina_hw_core::qdev::{Device, DeviceState};
-use machina_memory::region::MemoryRegion;
 
 struct TestDevice {
     state: DeviceState,
@@ -128,34 +125,4 @@ fn test_device_unrealize() {
 fn test_mdevice_lifecycle_created() {
     let state = DeviceState::new("dev0");
     assert_eq!(state.lifecycle(), MDeviceLifecycle::Created);
-}
-
-// -- SysBus tests --
-
-#[test]
-fn test_sysbus_empty() {
-    let bus = SysBus::new("main-bus");
-    assert_eq!(bus.name, "main-bus");
-    assert!(bus.mappings().is_empty());
-}
-
-#[test]
-fn test_sysbus_add_mapping() {
-    let mut bus = SysBus::new("sysbus");
-    let region = MemoryRegion::container("uart-mmio", 0x100);
-    bus.add_mapping(region, GPA::new(0x1000_0000));
-
-    assert_eq!(bus.mappings().len(), 1);
-    assert_eq!(bus.mappings()[0].base, GPA::new(0x1000_0000));
-    assert_eq!(bus.mappings()[0].region.name, "uart-mmio");
-}
-
-#[test]
-fn test_sysbus_multiple_mappings() {
-    let mut bus = SysBus::new("sysbus");
-    let r1 = MemoryRegion::container("uart", 0x100);
-    let r2 = MemoryRegion::container("timer", 0x200);
-    bus.add_mapping(r1, GPA::new(0x1000));
-    bus.add_mapping(r2, GPA::new(0x2000));
-    assert_eq!(bus.mappings().len(), 2);
 }

@@ -31,6 +31,8 @@ mod hw_qdev;
 #[cfg(test)]
 mod hw_ref_machine;
 #[cfg(test)]
+mod hw_sysbus;
+#[cfg(test)]
 mod hw_uart;
 #[cfg(test)]
 mod integration;

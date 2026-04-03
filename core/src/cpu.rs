@@ -25,6 +25,11 @@ pub trait GuestCpu {
     fn pending_interrupt(&self) -> bool {
         false
     }
+    /// Check if any interrupt is pending for WFI wakeup
+    /// (ignores privilege-level delegation checks).
+    fn pending_wfi_wakeup(&self) -> bool {
+        self.pending_interrupt()
+    }
     fn is_halted(&self) -> bool {
         false
     }
@@ -33,7 +38,7 @@ pub trait GuestCpu {
         0
     }
     fn handle_interrupt(&mut self) {}
-    fn handle_exception(&mut self, _excp: u32, _tval: u64) {}
+    fn handle_exception(&mut self, _cause: u64, _tval: u64) {}
     fn execute_mret(&mut self) {}
     fn execute_sret(&mut self) -> bool { true }
 
@@ -79,6 +84,13 @@ pub trait GuestCpu {
     /// Returns the physical PC from the last gen_code()
     /// call (for TB phys_pc recording).
     fn last_phys_pc(&self) -> u64 {
+        0
+    }
+
+    /// Translate a virtual PC to physical PC using the
+    /// current page table.  Returns 0 if translation is
+    /// not applicable (e.g. M-mode bare addressing).
+    fn translate_pc(&self, _vpc: u64) -> u64 {
         0
     }
 

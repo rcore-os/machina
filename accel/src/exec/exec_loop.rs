@@ -17,9 +17,9 @@ use super::{ExecEnv, PerCpuState, SharedState, MIN_CODE_BUF_REMAINING};
 use crate::cpu::GuestCpu;
 use crate::ir::context::Context;
 use crate::ir::tb::{
-    decode_tb_exit, TranslationBlock, EXCP_ECALL, EXCP_FENCE_I, EXCP_MRET,
-    EXCP_PRIV_CSR, EXCP_SFENCE_VMA, EXCP_SRET, EXCP_WFI, EXIT_TARGET_NONE,
-    TB_EXIT_NOCHAIN,
+    decode_tb_exit, TranslationBlock, EXCP_EBREAK, EXCP_ECALL, EXCP_FENCE_I,
+    EXCP_MRET, EXCP_PRIV_CSR, EXCP_SFENCE_VMA, EXCP_SRET, EXCP_WFI,
+    EXIT_TARGET_NONE, TB_EXIT_NOCHAIN,
 };
 use crate::translate::translate;
 use crate::HostCodeGen;
@@ -106,33 +106,6 @@ where
                 match tb_find(shared, per_cpu, cpu, pc, flags) {
                     Some(idx) => idx,
                     None => {
-                        // Temporary: log fetch failures
-                        // in M-mode handler range.
-                        if pc >= 0x80000060
-                            && pc < 0x80000100
-                        {
-                            use std::sync::atomic::{
-                                AtomicU64,
-                                Ordering as AO,
-                            };
-                            static FF: AtomicU64 =
-                                AtomicU64::new(0);
-                            let n = FF.fetch_add(
-                                1, AO::Relaxed,
-                            );
-                            if n < 10 {
-                                eprintln!(
-                                    "FETCH FAIL pc={:#x} \
-                                     flags={:#x} fault={}",
-                                    pc, flags,
-                                    cpu.check_mem_fault(),
-                                );
-                                // Already consumed
-                                // by check_mem_fault
-                                continue;
-                            }
-                        }
-                        // Might be a fetch fault.
                         if cpu.check_mem_fault() {
                             continue;
                         }
@@ -142,10 +115,44 @@ where
             }
         };
 
+        let _atomic_guard = if shared.tb_store.get(tb_idx).contains_atomic {
+            Some(shared.atomic_lock.lock().unwrap())
+        } else {
+            None
+        };
         let raw_exit = cpu_tb_exec(shared, cpu, tb_idx);
+        drop(_atomic_guard);
         let (last_tb, exit_code) = decode_tb_exit(raw_exit);
 
         let src_tb = last_tb.unwrap_or(tb_idx);
+
+        // Self-modifying code detection: if stores wrote
+        // to pages containing translated code, invalidate
+        // the affected TBs immediately.  Only code pages
+        // are tracked (store helper checks the code-page
+        // bitmap), so this is a no-op when the guest only
+        // writes to data pages.
+        //
+        // This is the machina equivalent of QEMU's
+        // PAGE_WRITE_INV / notdirty_write mechanism and
+        // provides the Ziccid guarantee (I-cache coherence
+        // for instruction data) unconditionally.
+        {
+            let dirty = cpu.take_dirty_pages();
+            if !dirty.is_empty() {
+                for page in &dirty {
+                    shared
+                        .tb_store
+                        .invalidate_phys_page(
+                            *page,
+                            shared.code_buf(),
+                            &shared.backend,
+                        );
+                }
+                per_cpu.jump_cache.invalidate();
+                next_tb_hint = None;
+            }
+        }
 
         match exit_code {
             v @ 0..=1 => {
@@ -232,35 +239,43 @@ where
             }
             v if v == EXCP_SFENCE_VMA as usize => {
                 per_cpu.stats.real_exit += 1;
-                // sfence.vma: flush TLB and jump cache only.
-                // TBs are NOT invalidated (matches QEMU).
-                // The TLB flush ensures the next memory
-                // access goes through slow-path page walk.
-                // TB correctness is maintained by phys_pc
-                // validation in tb_find.
+                // sfence.vma: flush TLB, jump cache, and
+                // invalidate all TBs. TB invalidation is
+                // needed because goto_tb chaining bypasses
+                // tb_find's phys_pc validation. Without
+                // it, a chained TB may execute stale code
+                // from a previous page-table mapping.
                 cpu.tlb_flush();
+                shared.tb_store.invalidate_all(
+                    shared.code_buf(),
+                    &shared.backend,
+                );
                 per_cpu.jump_cache.invalidate();
                 next_tb_hint = None;
             }
             v if v == EXCP_FENCE_I as usize => {
                 per_cpu.stats.real_exit += 1;
-                // fence.i: invalidate TBs by dirty
-                // physical page for instruction cache
-                // coherence.
+                // fence.i: invalidate TBs on pages that
+                // were written since the last fence.i.
+                // Only code pages are tracked (store
+                // helper checks the code-page bitmap).
                 let dirty = cpu.take_dirty_pages();
                 if dirty.is_empty() {
-                    // No stores tracked: conservative
-                    // full flush as fallback.
-                    shared
-                        .tb_store
-                        .invalidate_all(shared.code_buf(), &shared.backend);
+                    // No code-page writes tracked:
+                    // conservative full flush.
+                    shared.tb_store.invalidate_all(
+                        shared.code_buf(),
+                        &shared.backend,
+                    );
                 } else {
                     for page in &dirty {
-                        shared.tb_store.invalidate_phys_page(
-                            *page,
-                            shared.code_buf(),
-                            &shared.backend,
-                        );
+                        shared
+                            .tb_store
+                            .invalidate_phys_page(
+                                *page,
+                                shared.code_buf(),
+                                &shared.backend,
+                            );
                     }
                 }
                 per_cpu.jump_cache.invalidate();
@@ -269,9 +284,11 @@ where
             v if v == EXCP_WFI as usize => {
                 per_cpu.stats.real_exit += 1;
                 cpu.set_halted(true);
-                if cpu.pending_interrupt() {
+                if cpu.pending_wfi_wakeup() {
                     cpu.set_halted(false);
-                    cpu.handle_interrupt();
+                    if cpu.pending_interrupt() {
+                        cpu.handle_interrupt();
+                    }
                 } else {
                     let woken = cpu.wait_for_interrupt();
                     if !woken {
@@ -306,6 +323,11 @@ where
                     per_cpu.jump_cache.invalidate();
                     next_tb_hint = None;
                 }
+            }
+            v if v == EXCP_EBREAK as usize => {
+                per_cpu.stats.real_exit += 1;
+                let pc = cpu.get_pc();
+                cpu.handle_exception(3, pc);
             }
             v if v == EXCP_ECALL as usize => {
                 // The translator emits a unified EXCP_ECALL;
@@ -359,23 +381,39 @@ where
     B: HostCodeGen,
     C: GuestCpu<IrContext = Context>,
 {
-    // Fast path: jump cache (per-CPU, no lock needed)
-    if let Some(idx) = per_cpu.jump_cache.lookup(pc) {
-        let tb = shared.tb_store.get(idx);
-        if !tb.invalid.load(Ordering::Acquire)
-            && tb.pc == pc
-            && tb.flags == flags
-        {
-            per_cpu.stats.jc_hit += 1;
-            return Some(idx);
-        }
-    }
+    // Translate current virtual PC to physical for TB
+    // validation. After sfence.vma, the TLB is flushed
+    // so this triggers a page walk in gen_code.
+    // cur_phys == pc means bare/M-mode (no translation).
+    // cur_phys == 0 means TLB miss (page walk needed).
+    let cur_phys = cpu.translate_pc(pc);
 
-    // Slow path: hash table
-    if let Some(idx) = shared.tb_store.lookup(pc, flags) {
-        per_cpu.jump_cache.insert(pc, idx);
-        per_cpu.stats.ht_hit += 1;
-        return Some(idx);
+    // Fast path: jump cache (per-CPU, no lock needed)
+    if cur_phys != 0 {
+        if let Some(idx) = per_cpu.jump_cache.lookup(pc)
+        {
+            let tb = shared.tb_store.get(idx);
+            if !tb.invalid.load(Ordering::Acquire)
+                && tb.pc == pc
+                && tb.flags == flags
+                && tb.phys_pc == cur_phys
+            {
+                per_cpu.stats.jc_hit += 1;
+                return Some(idx);
+            }
+        }
+
+        // Slow path: hash table.
+        if let Some(idx) =
+            shared.tb_store.lookup(pc, flags)
+        {
+            let tb = shared.tb_store.get(idx);
+            if tb.phys_pc == cur_phys {
+                per_cpu.jump_cache.insert(pc, idx);
+                per_cpu.stats.ht_hit += 1;
+                return Some(idx);
+            }
+        }
     }
 
     // Miss: translate a new TB
@@ -411,7 +449,8 @@ where
 
     // SAFETY: we hold translate_lock, so exclusive access to
     // tbs Vec and code_buf emit methods.
-    let tb_idx = unsafe { shared.tb_store.alloc(pc, flags, 0) };
+    let tb_idx =
+        unsafe { shared.tb_store.alloc(pc, flags, 0) }?;
 
     guard.ir_ctx.reset();
     guard.ir_ctx.tb_idx = tb_idx as u32;
@@ -427,11 +466,15 @@ where
         }
         return None;
     }
+    let phys_pc = cpu.last_phys_pc();
     unsafe {
         let tb = shared.tb_store.get_mut(tb_idx);
         tb.size = guest_size;
-        tb.phys_pc = cpu.last_phys_pc();
+        tb.phys_pc = phys_pc;
     }
+    // Mark the physical page as containing code so the
+    // store helper can detect writes to code pages.
+    shared.tb_store.mark_code_page(phys_pc >> 12);
 
     shared.backend.clear_goto_tb_offsets();
 
@@ -447,6 +490,7 @@ where
         let tb = shared.tb_store.get_mut(tb_idx);
         tb.host_offset = host_offset;
         tb.host_size = host_size;
+        tb.contains_atomic = guard.ir_ctx.contains_atomic;
     }
 
     let offsets = shared.backend.goto_tb_offsets();

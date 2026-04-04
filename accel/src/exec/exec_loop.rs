@@ -199,6 +199,8 @@ where
                 if cached != EXIT_TARGET_NONE {
                     let tb = shared.tb_store.get(cached);
                     if !tb.invalid.load(Ordering::Acquire)
+                        && tb.gen.load(Ordering::Acquire)
+                            == shared.tb_store.global_gen()
                         && tb.pc == pc
                         && tb.flags == flags
                     {
@@ -491,8 +493,14 @@ where
         let tb = shared.tb_store.get_mut(tb_idx);
         tb.size = guest_size;
         tb.phys_pc = phys_pc;
+        // Stamp TB with current global generation so that
+        // invalidate_all's O(1) generation bump correctly
+        // identifies stale TBs.
+        tb.gen.store(
+            shared.tb_store.global_gen(), Ordering::Release,
+        );
     }
-    shared.tb_store.mark_code_page(phys_pc >> 12);
+    shared.tb_store.mark_code_page(phys_pc >> 12, tb_idx);
 
     shared.backend.clear_goto_tb_offsets();
 
@@ -578,7 +586,11 @@ fn tb_add_jump<B: HostCodeGen>(
         None => return,
     };
 
-    if shared.tb_store.get(dst).invalid.load(Ordering::Acquire) {
+    let dst_tb = shared.tb_store.get(dst);
+    if dst_tb.invalid.load(Ordering::Acquire)
+        || dst_tb.gen.load(Ordering::Acquire)
+            != shared.tb_store.global_gen()
+    {
         return;
     }
 

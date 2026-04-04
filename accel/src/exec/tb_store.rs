@@ -31,6 +31,15 @@ pub struct TbStore {
     /// AtomicU8 for lock-free read from store helpers.
     /// Saturates at 255 (never decrements past zero).
     code_pages: Vec<AtomicU8>,
+    /// Per-page head of TB linked list.
+    /// page_heads[phys_page] = Some(tb_idx) of first TB
+    /// on that page, or None.
+    page_heads: Mutex<Vec<Option<usize>>>,
+    /// Global generation counter. Incremented by invalidate_all
+    /// to instantly invalidate all TBs in O(1). Each TB records
+    /// the generation at which it was created; a mismatch
+    /// means the TB is stale.
+    global_gen: AtomicUsize,
 }
 
 // SAFETY:
@@ -56,6 +65,8 @@ impl TbStore {
             len: AtomicUsize::new(0),
             hash: Mutex::new(vec![None; TB_HASH_SIZE]),
             code_pages: cp,
+            page_heads: Mutex::new(vec![None; CODE_REFCOUNT_PAGES]),
+            global_gen: AtomicUsize::new(1),
         }
     }
 
@@ -111,13 +122,17 @@ impl TbStore {
     }
 
     /// Lookup a valid TB by (pc, flags) in the hash table.
+    /// Checks both tb.invalid and generation mismatch to
+    /// filter stale entries left by invalidate_all.
     pub fn lookup(&self, pc: u64, flags: u32) -> Option<usize> {
+        let gen = self.global_gen.load(Ordering::Acquire);
         let hash = self.hash.lock().unwrap();
         let bucket = TranslationBlock::hash(pc, flags);
         let mut cur = hash[bucket];
         while let Some(idx) = cur {
             let tb = self.get(idx);
             if !tb.invalid.load(Ordering::Acquire)
+                && tb.gen.load(Ordering::Acquire) == gen
                 && tb.pc == pc
                 && tb.flags == flags
             {
@@ -157,6 +172,8 @@ impl TbStore {
 
         // Decrement code-page refcount for the invalidated TB.
         self.dec_code_page(tb.phys_pc >> 12);
+        // Unlink from per-page list.
+        self.unlink_page(tb.phys_pc >> 12, tb_idx);
 
         // 1. Unlink incoming edges.
         let jmp_list = {
@@ -233,76 +250,82 @@ impl TbStore {
         }
     }
 
-    /// Invalidate all valid TBs by iterating and calling
-    /// `invalidate()` on each. Safe to call from the exec
-    /// loop (does not require exclusive access).
+    /// Invalidate all valid TBs in O(1) by bumping the
+    /// global generation counter. TB lookup and execution
+    /// paths check generation mismatch to detect stale TBs.
+    /// The hash table and per-page lists retain stale
+    /// entries that are filtered by generation checks
+    /// during lookup and invalidation.
     pub fn invalidate_all<B: HostCodeGen>(
         &self,
-        code_buf: &CodeBuffer,
-        backend: &B,
+        _code_buf: &CodeBuffer,
+        _backend: &B,
     ) {
-        let len = self.len.load(Ordering::Acquire);
-        for i in 0..len {
-            let tb = self.get(i);
-            if !tb.invalid.load(Ordering::Acquire) {
-                tb.invalid.store(true, Ordering::Release);
-                // 1. Unlink incoming edges.
-                let jmp_list = {
-                    let mut jmp = tb.jmp.lock().unwrap();
-                    std::mem::take(&mut jmp.jmp_list)
-                };
-                for (src, slot) in jmp_list {
-                    Self::reset_jump(
-                        self.get(src), code_buf, backend, slot,
-                    );
-                    let src_tb = self.get(src);
-                    let mut src_jmp = src_tb.jmp.lock().unwrap();
-                    src_jmp.jmp_dest[slot] = None;
-                }
-                // 2. Unlink outgoing edges.
-                for slot in 0..2 {
-                    let mut jmp = tb.jmp.lock().unwrap();
-                    if let Some(dst) = jmp.jmp_dest[slot].take() {
-                        drop(jmp);
-                        let dst_tb = self.get(dst);
-                        let mut dst_jmp =
-                            dst_tb.jmp.lock().unwrap();
-                        dst_jmp.jmp_list.retain(
-                            |&(s, n)| !(s == i && n == slot),
-                        );
-                    }
-                }
-                // 3. Remove from hash chain.
-                let pc = tb.pc;
-                let flags = tb.flags;
-                self.unlink_hash(pc, flags, i);
-            }
+        // Bump generation: all existing TBs become stale.
+        let old = self.global_gen.fetch_add(1, Ordering::Release);
+        // Avoid wrap-around to 0 (reserved for new TBs).
+        if old + 1 == 0 {
+            self.global_gen.store(1, Ordering::Release);
         }
-        // Bulk clear code-page refcounts.
+        // Bulk clear code-page refcounts. Not strictly
+        // needed for correctness (stale TBs are filtered
+        // by gen), but prevents false positives in
+        // is_code_page() that would cause unnecessary
+        // full-scan invalidation on dirty pages.
         for b in &self.code_pages {
             b.store(0, Ordering::Relaxed);
         }
     }
 
     /// Invalidate all TBs whose phys_pc falls within the
-    /// given physical page (page-granularity fence.i).
+    /// given physical page. Uses per-page linked list for
+    /// O(k) traversal where k = TBs on that page. Falls
+    /// back to full scan if the page has refcount > 0 but
+    /// the linked list is empty (TBs created before list
+    /// was populated).
     pub fn invalidate_phys_page<B: HostCodeGen>(
         &self,
         phys_page: u64,
         code_buf: &CodeBuffer,
         backend: &B,
     ) {
-        let len = self.len.load(Ordering::Acquire);
-        for i in 0..len {
-            let tb = self.get(i);
-            if !tb.invalid.load(Ordering::Acquire)
-                && (tb.phys_pc >> 12) == phys_page
-            {
-                self.invalidate(i, code_buf, backend);
+        let page_idx = phys_page as usize;
+        if page_idx >= CODE_REFCOUNT_PAGES {
+            return;
+        }
+        // Fast path: per-page linked list.
+        let tb_list: Vec<usize> = {
+            let heads = self.page_heads.lock().unwrap();
+            let mut list = Vec::new();
+            let mut cur = heads[page_idx];
+            while let Some(idx) = cur {
+                let tb = self.get(idx);
+                if !tb.invalid.load(Ordering::Acquire) {
+                    list.push(idx);
+                }
+                cur = tb.page_next;
+            }
+            list
+        };
+        if !tb_list.is_empty() {
+            for idx in tb_list {
+                self.invalidate(idx, code_buf, backend);
+            }
+            return;
+        }
+        // Fallback: full scan if refcount says there are
+        // TBs on this page but the list was empty.
+        if self.is_code_page(phys_page) {
+            let len = self.len.load(Ordering::Acquire);
+            for i in 0..len {
+                let tb = self.get(i);
+                if !tb.invalid.load(Ordering::Acquire)
+                    && (tb.phys_pc >> 12) == phys_page
+                {
+                    self.invalidate(i, code_buf, backend);
+                }
             }
         }
-        // No rebuild_code_bitmap needed: invalidate()
-        // already decremented per-page refcounts.
     }
 
     /// Flush all TBs and reset the hash table.
@@ -321,17 +344,25 @@ impl TbStore {
 
     // ── Code-page refcount ──────────────────────────
 
-    /// Increment code-page refcount when a TB is created.
-    /// Called under translate_lock after setting phys_pc.
-    pub fn mark_code_page(&self, phys_page: u64) {
+    /// Increment code-page refcount and prepend TB to
+    /// per-page linked list. Called under translate_lock.
+    pub fn mark_code_page(&self, phys_page: u64, tb_idx: usize) {
         let idx = phys_page as usize;
-        if idx < self.code_pages.len() {
-            self.code_pages[idx]
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                    Some(v.saturating_add(1))
-                })
-                .ok();
+        if idx >= CODE_REFCOUNT_PAGES {
+            return;
         }
+        self.code_pages[idx]
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_add(1))
+            })
+            .ok();
+        // SAFETY: called under translate_lock.
+        let mut heads = self.page_heads.lock().unwrap();
+        let old_head = heads[idx];
+        unsafe {
+            self.get_mut(tb_idx).page_next = old_head;
+        }
+        heads[idx] = Some(tb_idx);
     }
 
     /// Decrement code-page refcount when a TB is invalidated.
@@ -358,29 +389,32 @@ impl TbStore {
         }
     }
 
-    /// Remove a TB from the hash chain by (pc, flags).
-    fn unlink_hash(&self, pc: u64, flags: u32, tb_idx: usize) {
-        let bucket = TranslationBlock::hash(pc, flags);
-        let mut hash = self.hash.lock().unwrap();
+    /// Remove a TB from its per-page linked list.
+    fn unlink_page(&self, phys_page: u64, tb_idx: usize) {
+        let idx = phys_page as usize;
+        if idx >= CODE_REFCOUNT_PAGES {
+            return;
+        }
+        let mut heads = self.page_heads.lock().unwrap();
         let mut prev: Option<usize> = None;
-        let mut cur = hash[bucket];
-        while let Some(idx) = cur {
-            if idx == tb_idx {
-                let next = self.get(idx).hash_next;
+        let mut cur = heads[idx];
+        while let Some(i) = cur {
+            if i == tb_idx {
+                let next = self.get(i).page_next;
                 if let Some(p) = prev {
                     unsafe {
-                        self.get_mut(p).hash_next = next;
+                        self.get_mut(p).page_next = next;
                     }
                 } else {
-                    hash[bucket] = next;
+                    heads[idx] = next;
                 }
                 unsafe {
-                    self.get_mut(idx).hash_next = None;
+                    self.get_mut(tb_idx).page_next = None;
                 }
                 return;
             }
             prev = cur;
-            cur = self.get(idx).hash_next;
+            cur = self.get(i).page_next;
         }
     }
 
@@ -393,6 +427,11 @@ impl TbStore {
     /// Number of bytes in the code-page bitmap.
     pub fn code_pages_len(&self) -> usize {
         self.code_pages.len()
+    }
+
+    /// Read the current global generation counter.
+    pub fn global_gen(&self) -> usize {
+        self.global_gen.load(Ordering::Acquire)
     }
 
     pub fn len(&self) -> usize {

@@ -45,6 +45,11 @@ pub struct TranslationBlock {
     pub phys_pc: u64,
     /// Protected by TbStore hash lock.
     pub hash_next: Option<usize>,
+    /// Next TB on the same physical code page.
+    /// Singly-linked list per page for O(k) invalidation.
+    /// Protected by translate_lock (prepend) and
+    /// page_heads lock (unlink during invalidation).
+    pub page_next: Option<usize>,
 
     // -- Per-TB lock for chaining state --
     pub jmp: Mutex<TbJmpState>,
@@ -52,6 +57,9 @@ pub struct TranslationBlock {
 
     // -- Atomic --
     pub invalid: AtomicBool,
+    /// Generation at which this TB was created. Compared
+    /// against TbStore::global_gen for O(1) bulk invalidation.
+    pub gen: AtomicUsize,
     /// Single-entry target cache for indirect exits (atomic,
     /// lock-free). EXIT_TARGET_NONE means no cached target.
     pub exit_target: AtomicUsize,
@@ -97,9 +105,11 @@ impl TranslationBlock {
             jmp_reset_offset: [None; 2],
             phys_pc: 0,
             hash_next: None,
+            page_next: None,
             jmp: Mutex::new(TbJmpState::new()),
             contains_atomic: false,
             invalid: AtomicBool::new(false),
+            gen: AtomicUsize::new(0),
             exit_target: AtomicUsize::new(EXIT_TARGET_NONE),
         }
     }

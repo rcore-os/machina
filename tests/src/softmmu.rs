@@ -711,6 +711,7 @@ fn test_fence_i_invalidates_dirty_page_tbs() {
     unsafe {
         store.get_mut(idx).phys_pc = 0x8000_1000;
     }
+    store.mark_code_page(0x8000_1000 >> 12, idx);
     store.insert(idx);
 
     assert!(!store.get(idx).invalid.load(Ordering::Acquire));

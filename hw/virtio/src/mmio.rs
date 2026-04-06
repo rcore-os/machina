@@ -1,7 +1,7 @@
 // VirtIO MMIO transport (Modern, v2).
 //
 // Implements the standard VirtIO MMIO register interface
-// and delegates device-specific operations to a VirtioBlk
+// and delegates device-specific operations to a VirtioDevice
 // backend.
 
 use std::any::Any;
@@ -16,8 +16,8 @@ use machina_memory::address_space::AddressSpace;
 use machina_memory::region::MemoryRegion;
 use machina_memory::region::MmioOps;
 
-use crate::block::VirtioBlk;
 use crate::queue::{VirtQueue, MAX_QUEUE_SIZE};
+use crate::VirtioDevice;
 
 // MMIO register offsets.
 const MAGIC_VALUE: u64 = 0x000;
@@ -54,13 +54,12 @@ const LEGACY_QUEUE_ALIGN: u64 = 0x03c;
 const VIRTIO_MAGIC: u32 = 0x74726976;
 const VIRTIO_VENDOR: u32 = 0x554D4551;
 const VIRTIO_VERSION: u32 = 2;
-const VIRTIO_DEVICE_BLK: u32 = 2;
 
 // Max number of queues per device.
 const NUM_QUEUES: usize = 1;
 
 struct VirtioMmioState {
-    device: VirtioBlk,
+    device: Box<dyn VirtioDevice>,
     irq: IrqLine,
 
     // Transport state.
@@ -119,6 +118,7 @@ impl VirtioMmioState {
         }
         let n = unsafe {
             self.device.handle_queue(
+                sel as u32,
                 q,
                 self.ram_ptr,
                 self.ram_base,
@@ -140,7 +140,7 @@ pub struct VirtioMmio {
 
 impl VirtioMmio {
     pub fn new(
-        device: VirtioBlk,
+        device: Box<dyn VirtioDevice>,
         irq: IrqLine,
         ram_ptr: *mut u8,
         ram_base: u64,
@@ -151,7 +151,7 @@ impl VirtioMmio {
 
     pub fn new_named(
         local_id: &str,
-        device: VirtioBlk,
+        device: Box<dyn VirtioDevice>,
         irq: IrqLine,
         ram_ptr: *mut u8,
         ram_base: u64,
@@ -233,7 +233,7 @@ impl VirtioMmio {
         match offset {
             MAGIC_VALUE => VIRTIO_MAGIC as u64,
             VERSION => VIRTIO_VERSION as u64,
-            DEVICE_ID => VIRTIO_DEVICE_BLK as u64,
+            DEVICE_ID => state.device.device_id() as u64,
             VENDOR_ID => VIRTIO_VENDOR as u64,
             DEVICE_FEATURES => {
                 let feat = state.device.features();

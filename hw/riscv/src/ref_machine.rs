@@ -756,7 +756,7 @@ impl Machine for RefMachine {
             let ram_ptr = self.ram_block.as_ref().unwrap().as_ptr();
             let mut virtio_mmio = VirtioMmio::new_named(
                 "virtio-mmio0",
-                blk,
+                Box::new(blk),
                 virtio_irq,
                 ram_ptr,
                 RAM_BASE,

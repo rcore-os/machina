@@ -1165,15 +1165,14 @@ unsafe fn write_phys_sized(cpu: *mut RiscvCpu, pa: u64, val: u64, size: u32) {
         let cp = cpu_ref.code_pages_ptr;
         if cp != 0 {
             let page = pa >> 12;
-            let idx = (page as usize) / 8;
-            let bit = (page as usize) % 8;
+            let idx = page as usize;
             let len = cpu_ref.code_pages_len as usize;
             if idx < len {
                 use std::sync::atomic::AtomicU8;
                 let bp = cp as *const AtomicU8;
                 let v =
                     (*bp.add(idx)).load(std::sync::atomic::Ordering::Relaxed);
-                if v & (1u8 << bit) != 0 {
+                if v != 0 {
                     let cpu_mut = &mut *cpu;
                     if !cpu_mut.dirty_pages.contains(&page) {
                         cpu_mut.dirty_pages.push(page);
@@ -1377,7 +1376,11 @@ fn gdb_read_phys(
     pa: u64,
     len: usize,
 ) -> Vec<u8> {
-    if pa >= RAM_BASE && pa + len as u64 <= ram_end {
+    if pa >= RAM_BASE
+        && pa
+            .checked_add(len as u64)
+            .is_some_and(|end| end <= ram_end)
+    {
         let off = pa.wrapping_sub(RAM_BASE);
         let ptr = unsafe { ram_ptr.add(off as usize) };
         let mut buf = vec![0u8; len];
@@ -1408,7 +1411,11 @@ fn gdb_write_phys(
     pa: u64,
     data: &[u8],
 ) -> bool {
-    if pa >= RAM_BASE && pa + data.len() as u64 <= ram_end {
+    if pa >= RAM_BASE
+        && pa
+            .checked_add(data.len() as u64)
+            .is_some_and(|end| end <= ram_end)
+    {
         let off = pa.wrapping_sub(RAM_BASE);
         let ptr = unsafe { (ram_ptr as *mut u8).add(off as usize) };
         unsafe {

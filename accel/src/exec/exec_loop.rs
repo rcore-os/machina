@@ -455,6 +455,8 @@ where
     if let Some(idx) = per_cpu.jump_cache.lookup(pc) {
         let tb = shared.tb_store.get(idx);
         if !tb.invalid.load(Ordering::Acquire)
+            && tb.gen.load(Ordering::Acquire)
+                == shared.tb_store.global_gen()
             && tb.pc == pc
             && tb.flags == flags
             && (cur_phys == u64::MAX || tb.phys_pc == cur_phys)

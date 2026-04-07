@@ -94,8 +94,6 @@ pub struct GdbState {
     watchpoint_count: AtomicUsize,
     /// Physical memory mode (bypass MMU for GDB mem).
     phy_mem_mode: AtomicBool,
-    /// TB flush requested (breakpoint change).
-    tb_flush_needed: AtomicBool,
 }
 
 struct GdbInner {
@@ -142,7 +140,6 @@ impl GdbState {
             as_ptr: AtomicU64::new(0),
             watchpoint_count: AtomicUsize::new(0),
             phy_mem_mode: AtomicBool::new(false),
-            tb_flush_needed: AtomicBool::new(false),
         }
     }
 
@@ -399,19 +396,16 @@ impl GdbState {
 
     pub fn set_breakpoint(&self, addr: u64) -> bool {
         self.inner.lock().unwrap().breakpoints.insert(addr);
-        self.tb_flush_needed.store(true, Ordering::Release);
         true
     }
 
     pub fn remove_breakpoint(&self, addr: u64) -> bool {
         self.inner.lock().unwrap().breakpoints.remove(&addr);
-        self.tb_flush_needed.store(true, Ordering::Release);
         true
     }
 
     pub fn set_hw_breakpoint(&self, addr: u64) -> bool {
         self.inner.lock().unwrap().hw_breakpoints.insert(addr);
-        self.tb_flush_needed.store(true, Ordering::Release);
         true
     }
 
@@ -430,42 +424,20 @@ impl GdbState {
         !inner.breakpoints.is_empty() || !inner.hw_breakpoints.is_empty()
     }
 
-    /// Take the TB flush flag (clear after read).
-    pub fn take_tb_flush(&self) -> bool {
-        self.tb_flush_needed
-            .compare_exchange(
-                true,
-                false,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            )
-            .is_ok()
-    }
-
-    /// Return the lowest breakpoint address in
-    /// (start, end]. Used to limit TB translation so
-    /// TBs don't span breakpoint addresses.
-    pub fn next_breakpoint_in_range(
+    /// Check if any breakpoint falls within (start, end).
+    /// Used by the exec loop to detect TBs that span a
+    /// breakpoint and need single-step replacement.
+    pub fn breakpoint_in_range(
         &self,
         start: u64,
         end: u64,
-    ) -> Option<u64> {
+    ) -> bool {
         let inner = self.inner.lock().unwrap();
-        let mut best: Option<u64> = None;
-        for &addr in inner
+        inner
             .breakpoints
             .iter()
             .chain(inner.hw_breakpoints.iter())
-        {
-            if addr > start && addr < end {
-                best = Some(match best {
-                    Some(b) if addr < b => addr,
-                    Some(b) => b,
-                    None => addr,
-                });
-            }
-        }
-        best
+            .any(|&addr| addr > start && addr < end)
     }
 
     // -- Watchpoint management --

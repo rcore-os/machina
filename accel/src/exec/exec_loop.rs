@@ -87,17 +87,6 @@ where
         }
         per_cpu.stats.loop_iters += 1;
 
-        // Flush TBs if requested (breakpoint change, satp
-        // write, etc.). Must happen before TB lookup so
-        // stale TBs that span breakpoint addresses are gone.
-        if cpu.take_tb_flush_pending() {
-            shared
-                .tb_store
-                .invalidate_all(shared.code_buf(), &shared.backend);
-            per_cpu.jump_cache.invalidate();
-            next_tb_hint = None;
-        }
-
         let stepping = cpu.gdb_single_step();
 
         // Suppress interrupts during GDB single-step
@@ -117,11 +106,12 @@ where
             cpu.reset_exit_request();
         }
 
+        let pc = cpu.get_pc();
+        let flags = cpu.get_flags();
+
         let tb_idx = if stepping {
-            // Single-step: translate a fresh 1-insn TB,
-            // bypassing all caches.
-            let pc = cpu.get_pc();
-            let flags = cpu.get_flags();
+            // GDB single-step: translate a fresh 1-insn TB,
+            // bypassing all caches (QEMU CF_SINGLE_STEP).
             let cf = CF_SINGLE_STEP | 1;
             match tb_gen_code_cflags(shared, per_cpu, cpu, pc, flags, cf) {
                 Some(idx) => idx,
@@ -133,14 +123,13 @@ where
                 }
             }
         } else {
-            match next_tb_hint.take() {
+            // Normal TB lookup (hint or hash table).
+            let idx = match next_tb_hint.take() {
                 Some(idx) => {
                     per_cpu.stats.hint_used += 1;
                     idx
                 }
                 None => {
-                    let pc = cpu.get_pc();
-                    let flags = cpu.get_flags();
                     match tb_find(shared, per_cpu, cpu, pc, flags) {
                         Some(idx) => idx,
                         None => {
@@ -151,6 +140,33 @@ where
                         }
                     }
                 }
+            };
+
+            // GDB breakpoint within TB: if the found TB
+            // spans a breakpoint address, replace it with
+            // a 1-insn ephemeral TB so the exec loop can
+            // check breakpoints at each instruction
+            // boundary. The original TB stays in cache for
+            // non-debug execution (QEMU cflags approach).
+            let tb = shared.tb_store.get(idx);
+            if cpu.gdb_breakpoint_in_tb(
+                tb.pc,
+                tb.size as u64,
+            ) {
+                let cf = CF_SINGLE_STEP | 1;
+                match tb_gen_code_cflags(
+                    shared, per_cpu, cpu, pc, flags, cf,
+                ) {
+                    Some(ss_idx) => ss_idx,
+                    None => {
+                        if cpu.check_mem_fault() {
+                            continue;
+                        }
+                        return ExitReason::BufferFull;
+                    }
+                }
+            } else {
+                idx
             }
         };
 

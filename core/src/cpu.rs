@@ -147,15 +147,16 @@ pub trait GuestCpu {
         false
     }
 
-    /// Return the next GDB breakpoint address in
-    /// (pc, pc+max_bytes). Used during TB translation
-    /// to stop the TB before the breakpoint so that
-    /// the exec loop's entry check can fire.
-    fn gdb_next_breakpoint(
+    /// Check if any GDB breakpoint falls within a TB's
+    /// address range (tb_pc, tb_pc + tb_size]. Used to
+    /// decide whether to replace a cached multi-insn TB
+    /// with a 1-insn ephemeral TB for breakpoint
+    /// precision.
+    fn gdb_breakpoint_in_tb(
         &self,
-        _pc: u64,
-        _max_bytes: u64,
-    ) -> Option<u64> {
-        None
+        _tb_pc: u64,
+        _tb_size: u64,
+    ) -> bool {
+        false
     }
 }
